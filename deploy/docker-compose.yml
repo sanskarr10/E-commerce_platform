@@ -1,0 +1,112 @@
+# Run from the repo root:  make up   (or: docker compose --env-file .env -f deploy/docker-compose.yml up --build)
+name: ecommerce
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-catalog}
+      MYSQL_USER: ${MYSQL_USER:?set in .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set in .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?set in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?set in .env}
+    ports:
+      - "127.0.0.1:15672:15672" # management UI, localhost only
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  user-service:
+    build: ../services/user-service
+    # Migrations run before the app starts. In Kubernetes this becomes a Helm pre-upgrade Job.
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/users_db
+      JWT_PRIVATE_KEY_PATH: /run/keys/jwt_private.pem
+      JWT_PUBLIC_KEY_PATH: /run/keys/jwt_public.pem
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    volumes:
+      - ./keys:/run/keys:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s # migrations run before the app starts
+    restart: unless-stopped
+
+  gateway:
+    image: nginx:1.27-alpine
+    environment:
+      NGINX_RESOLVER: 127.0.0.11 # Docker's embedded DNS
+    ports:
+      - "${GATEWAY_PORT:-8080}:80"
+    volumes:
+      - ../gateway/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    depends_on:
+      user-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  mysql-data:
+  redis-data:
+  rabbitmq-data:

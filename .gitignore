@@ -1,0 +1,27 @@
+# secrets and local config
+.env
+deploy/keys/
+*.pem
+
+# backups
+backups/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# node
+node_modules/
+dist/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

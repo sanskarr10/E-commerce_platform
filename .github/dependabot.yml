@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Keeps pinned dependencies and workflow actions current via reviewable PRs.
+  - package-ecosystem: pip
+    directory: /services/user-service
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/user-service
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
