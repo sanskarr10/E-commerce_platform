@@ -9,6 +9,14 @@ updates:
     directory: /services/user-service
     schedule:
       interval: weekly
+  - package-ecosystem: npm
+    directory: /services/product-service
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/product-service
+    schedule:
+      interval: weekly
   - package-ecosystem: github-actions
     directory: /
     schedule:

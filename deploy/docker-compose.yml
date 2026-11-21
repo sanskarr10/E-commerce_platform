@@ -66,7 +66,8 @@ services:
   user-service:
     build: ../services/user-service
     # Migrations run before the app starts. In Kubernetes this becomes a Helm pre-upgrade Job.
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # `exec` makes the server PID 1 so it receives SIGTERM and shuts down gracefully.
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment:
       ENVIRONMENT: development
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/users_db
@@ -87,6 +88,35 @@ services:
       start_period: 30s # migrations run before the app starts
     restart: unless-stopped
 
+  product-service:
+    build: ../services/product-service
+    # Migrations run before the app starts. In Kubernetes this becomes a Helm pre-upgrade Job.
+    command: sh -c "node src/migrate.js && exec node src/server.js"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      MYSQL_HOST: mysql
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-catalog}
+      MYSQL_USER: ${MYSQL_USER:?set in .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set in .env}
+      REDIS_URL: redis://redis:6379
+      JWT_PUBLIC_KEY_PATH: /run/keys/jwt_public.pem
+    volumes:
+      # Only the PUBLIC key: this service can verify tokens but can never mint them.
+      - ./keys/jwt_public.pem:/run/keys/jwt_public.pem:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s # migrations run before the app starts
+    restart: unless-stopped
+
   gateway:
     image: nginx:1.27-alpine
     environment:
@@ -97,6 +127,8 @@ services:
       - ../gateway/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       user-service:
+        condition: service_healthy
+      product-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null || exit 1"]
