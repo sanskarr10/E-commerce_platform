@@ -76,6 +76,13 @@ export const idSchema = z
   .regex(/^[1-9]\d{0,15}$/, 'Must be a positive integer')
   .transform(Number);
 
+/** "?ids=1,2,3": at most 50 distinct positive integers. Duplicates are collapsed. */
+export const idsSchema = z
+  .string()
+  .regex(/^[1-9]\d{0,15}(,[1-9]\d{0,15})*$/, 'Use a comma-separated list of positive integers')
+  .transform((value) => [...new Set(value.split(',').map(Number))])
+  .refine((ids) => ids.length <= 50, 'At most 50 ids per request');
+
 export const listQuerySchema = z
   .object({
     q: z

@@ -4,6 +4,7 @@ import {
   categorySchema,
   createProductSchema,
   idSchema,
+  idsSchema,
   listQuerySchema,
   slugify,
   stockSchema,
@@ -129,6 +130,19 @@ describe('idSchema', () => {
   it('accepts positive integers only', () => {
     assert.equal(ok(idSchema, '42'), 42);
     for (const value of ['0', '-1', '1.5', '1e3', 'abc', '', ' 1', '01', '9'.repeat(20)]) bad(idSchema, value);
+  });
+});
+
+describe('idsSchema', () => {
+  it('parses a comma-separated list and collapses duplicates', () => {
+    assert.deepEqual(ok(idsSchema, '3,1,3,2'), [3, 1, 2]);
+    assert.deepEqual(ok(idsSchema, '7'), [7]);
+  });
+
+  it('rejects empty, malformed and oversized lists', () => {
+    for (const value of ['', ',', '1,', ',1', '1,,2', '1, 2', '0', '1,-2', 'a,b', '1.5']) bad(idsSchema, value);
+    bad(idsSchema, Array.from({ length: 51 }, (_, i) => i + 1).join(','));
+    ok(idsSchema, Array.from({ length: 50 }, (_, i) => i + 1).join(','));
   });
 });
 

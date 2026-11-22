@@ -3,12 +3,14 @@
 A polyglot microservices e-commerce backend built to demonstrate service boundaries, event-driven
 design, caching, and a production-style DevOps workflow: Docker, Nginx gateway, GitHub Actions, and Kubernetes.
 
-> **Status: Phase 2 complete.** Infrastructure, API gateway, CI, the **User Service** (FastAPI) and the
-> **Product Service** (Node.js) are implemented and tested. The remaining services are tracked in the
+> **Status: Phase 3 complete.** Infrastructure, API gateway, CI, and the **User**, **Product**, **Order** and
+> **Payment** services are implemented, including the RabbitMQ checkout saga. The rest is in the
 > [roadmap](#roadmap). Replace `<you>/<repo>` in the badges below after pushing to GitHub.
 
 ![user-service](https://github.com/<you>/<repo>/actions/workflows/user-service.yml/badge.svg)
 ![product-service](https://github.com/<you>/<repo>/actions/workflows/product-service.yml/badge.svg)
+![order-service](https://github.com/<you>/<repo>/actions/workflows/order-service.yml/badge.svg)
+![payment-service](https://github.com/<you>/<repo>/actions/workflows/payment-service.yml/badge.svg)
 ![platform-checks](https://github.com/<you>/<repo>/actions/workflows/platform-checks.yml/badge.svg)
 
 ## Architecture
@@ -19,21 +21,34 @@ design, caching, and a production-style DevOps workflow: Docker, Nginx gateway, 
                     ▼
             ┌───────────────┐   /api/users     ──► User Service      (FastAPI)  ──► PostgreSQL users_db
             │ Nginx gateway │   /api/products  ──► Product Service   (Node.js)  ──► MySQL catalog  + Redis cache
-            │ rate limiting │   /api/orders    ──► Order Service     (FastAPI)  ──► PostgreSQL orders_db      (planned)
-            │ X-Request-ID  │   /api/payments  ──► Payment Service   (FastAPI)  ──► PostgreSQL payments_db    (planned)
+            │ rate limiting │   /api/orders    ──► Order Service     (FastAPI)  ──► PostgreSQL orders_db
+            │ X-Request-ID  │   /api/payments  ──► Payment Service   (FastAPI)  ──► PostgreSQL payments_db
             └───────────────┘
-                                   RabbitMQ (events)  ◄──►  Notification Service (Node.js)                   (planned)
+                                   RabbitMQ (events)  ◄──►  Order ⇄ Product ⇄ Payment      Notification Service (planned)
 ```
 
 Each service owns its database. Services never query each other's data; they talk over HTTP or events.
 The user-service signs JWTs with a private key; every other service verifies them with the **public key only**.
 
-### Planned checkout flow (saga, choreography)
+### Checkout saga
 
-`order.created` → stock reserved (`stock.reserved` / `stock.failed`) → payment charged
-(`payment.succeeded` / `payment.failed`) → order `PAID` or `CANCELLED` (with a compensating stock
-release) → notification sent. Consumers are idempotent; failures go to a dead-letter queue.
-The product service already implements the atomic `reserveStock` / `releaseStock` operations this flow needs.
+Placing an order returns immediately with status `PENDING`; the rest happens asynchronously over RabbitMQ.
+The **Order service coordinates** the saga and owns the order status.
+
+```
+POST /api/orders (Idempotency-Key)  →  order PENDING, order.created
+  Product service: reserve stock (all or nothing)  →  stock.reserved | stock.failed
+  Order service:   STOCK_RESERVED, payment.requested         (or CANCELLED: out_of_stock)
+  Payment service: charge with an idempotency key  →  payment.succeeded | payment.failed
+  Order service:   PAID, order.confirmed                      (or CANCELLED: payment_failed, order.cancelled)
+  Product service: order.cancelled  →  release the reserved stock (compensation)
+```
+
+Every service uses a **transactional outbox** (state change and event are one database transaction, published
+afterwards with publisher confirms) and an **idempotent inbox** (event id recorded with the effect), so delivery
+is at-least-once but effects happen once. Failures retry through a TTL queue and end in a dead-letter queue.
+The full contract, sequence diagram, state machine and failure table are in [`docs/events/`](docs/events/README.md),
+with JSON fixtures that every service's contract tests load.
 
 ## Quick start
 
@@ -42,11 +57,11 @@ Requirements: Docker with Compose v2, `openssl`, `make`, `curl`, `jq`.
 ```bash
 make up      # creates .env + JWT keys, builds, starts the stack, waits until healthy
 make seed    # loads 4 categories and 12 sample products
-make smoke   # end-to-end checks for both services (auth, CRUD, caching, invalidation)
+make smoke   # end-to-end checks: auth, catalog, caching, and the whole checkout saga
 ```
 
 - Gateway: http://localhost:8080
-- Swagger UI: http://localhost:8080/api/users/docs and http://localhost:8080/api/products/docs
+- Swagger UI: `/api/users/docs`, `/api/products/docs`, `/api/orders/docs`, `/api/payments/docs` on the gateway
 - RabbitMQ management UI: http://localhost:15672 (localhost only)
 - A bootstrap admin is created from `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env`. **Change these.**
 
@@ -56,13 +71,15 @@ make smoke   # end-to-end checks for both services (auth, CRUD, caching, invalid
 
 | Component | Status | Notes |
 |---|---|---|
-| Docker Compose stack | Done | PostgreSQL, MySQL, Redis, RabbitMQ, both services, gateway; healthchecks and `depends_on` ordering |
+| Docker Compose stack | Done | PostgreSQL, MySQL, Redis, RabbitMQ, four services, gateway; healthchecks and `depends_on` ordering |
 | Nginx gateway | Done | Path routing, per-endpoint rate limits (stricter on auth), `X-Request-ID` correlation id, JSON 503 when a service is down |
 | **User Service** | Done | Register, login, rotating refresh tokens, profile, admin user list; 30 tests |
-| **Product Service** | Done | Catalog CRUD, search/filter/sort/pagination, atomic stock, Redis caching, OpenAPI docs; 94 unit tests plus integration tests |
+| **Product Service** | Done | Catalog CRUD, search/filter/sort/pagination, atomic stock, Redis caching, per-order stock reservation and release over events, batch lookup, OpenAPI docs |
+| **Order Service** | Done | Idempotent order placement, price snapshot, state machine, saga coordinator, admin fulfilment, outbox relay |
+| **Payment Service** | Done | Mock provider with idempotent charges, exactly-once charging, outcome events, read-only API |
 | GitHub Actions CI | Done | Path-filtered pipeline per service: lint, tests, real PostgreSQL/MySQL/Redis, Trivy scan, push to GHCR |
-| Bash tooling | Done | `gen-keys`, `healthcheck`, `smoke-test`, `smoke-test-products`, `db-backup` (all ShellCheck-clean) |
-| Order, Payment, Notification services | Planned | Gateway routes already exist and return 503 until they are built |
+| Bash tooling | Done | `gen-keys`, `healthcheck`, `smoke-test`, `smoke-test-products`, `smoke-test-orders`, `db-backup` (all ShellCheck-clean) |
+| Notification service | Planned | Will consume `order.confirmed`, `order.shipped`, `order.delivered`, `order.cancelled` |
 | React storefront and admin | Planned | |
 | Helm chart / Kubernetes | Planned | |
 
@@ -100,6 +117,54 @@ issued by the user-service. Prices are integers in **minor units** (`49900` = IN
 Read responses carry an `X-Cache: HIT | MISS | BYPASS` header. Errors use the same `{ "detail": ... }` shape as the
 FastAPI service, and validation errors list `loc` and `msg` per field, so one client can handle both services.
 Probes: `GET /health` and `GET /ready` (MySQL must answer; Redis being down only degrades speed).
+
+## Order Service API
+
+All paths are served under `/api/orders`. Every endpoint needs a Bearer token.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/` | customer | Place an order. **Requires an `Idempotency-Key` header.** Body: `{ "items": [{ "product_id": 1, "quantity": 2 }], "payment_method": "tok_success" }`. Returns `201` (`PENDING`). A retry with the same key returns `200` with `Idempotent-Replayed: true`; the same key with a different body is `422` |
+| GET | `/` | customer | My orders, newest first (`page`, `page_size`) |
+| GET | `/{id}` | owner or admin | One order with its status history. Someone else's order is `404`, not `403` |
+| GET | `/admin/list` | admin | All orders, optional `status` filter |
+| POST | `/{id}/ship`, `/{id}/deliver` | admin | `PAID` → `SHIPPED` → `DELIVERED`; anything else is `409` |
+
+Prices are never accepted from the client: they are read from the product service at checkout and stored as a
+snapshot on the order. `payment_method` is a provider token (see below), never a card number.
+
+## Payment Service API
+
+Payments are created by the saga, so the HTTP API is read-only. Paths are under `/api/payments`.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/orders/{order_id}` | owner or admin | The payment for an order (`404` for anyone else) |
+| GET | `/admin/list` | admin | All payments, optional `status` filter |
+
+The mock provider decides by token, which makes every saga path reproducible:
+
+| `payment_method` | Result |
+|---|---|
+| `tok_success` | Approved |
+| `tok_decline` / `tok_insufficient` | Declined (`card_declined` / `insufficient_funds`) → order cancelled, stock released |
+| `tok_flaky` | Provider fails once, the retry succeeds |
+| `tok_error` | Provider always fails → retried, then dead-lettered |
+
+## Messaging reliability
+
+- **Transactional outbox.** An order and its `order.created` event are one database transaction. A relay publishes
+  with publisher confirms and marks a row published only after the broker confirmed it, so a crash causes a duplicate,
+  never a lost event. Rows are leased and claimed with `SKIP LOCKED`, so several replicas can relay safely.
+- **Idempotent inbox.** Consumers record the event id in the same transaction as the effect; a redelivery is a no-op.
+- **Exactly one charge.** The payment id is the provider idempotency key and `order_id` is unique. A crash after the
+  provider charged but before the result was saved is retried with the same key, so the customer is not charged twice.
+- **Stock held per order.** One reservation row per order (primary key), released exactly once, with a tombstone if
+  the cancellation overtakes the order.
+- **Retry and dead letters.** A failed handler re-publishes to a TTL retry queue; after `EVENT_MAX_RETRIES` or on a
+  permanent error (malformed payload) the message goes to `<queue>.dlq`. The message is re-published before it is
+  acked, so a failure in between duplicates rather than loses it.
+- **Broker down.** The HTTP APIs keep working and orders queue up in the outbox; the saga resumes when RabbitMQ returns.
 
 ## Caching design (Product Service)
 
@@ -141,9 +206,13 @@ Closing that window completely needs versioned detail keys or write-through cach
 | Layer | Service | What it covers | Needs |
 |---|---|---|---|
 | Unit and HTTP | user-service (30) | Auth flows, token attacks, admin routes, bootstrap | nothing (SQLite) |
-| Unit and HTTP | product-service (94) | Validation, query builder, JWT verification, routes, cache behaviour, OpenAPI drift guard | nothing (in-memory fakes) |
+| Unit and HTTP | product-service (140) | Validation, query builder, JWT verification, routes, cache, saga handlers, consumer decisions, relay, AMQP adapter (fake channel), contract fixtures, OpenAPI drift guard | nothing (in-memory fakes) |
+| Unit, HTTP and saga | order-service (79) | Idempotency, state machine (every move), each saga handler and its edge cases, contract fixtures, relay, retry/DLQ decisions | nothing (SQLite) |
+| Unit and saga | payment-service (50) | Mock provider, success/decline/transient/flaky, **crash after charge**, duplicate events, contract fixtures | nothing (SQLite) |
+| Races on PostgreSQL | order-service, payment-service | Concurrent identical POSTs create one order, concurrent duplicate events apply once, relays never claim the same row, one charge under concurrency; the whole suite and Alembic migration/model drift check | `TEST_DATABASE_URL` |
+| Integration | product-service | Real RabbitMQ: topic routing, publisher confirms, retry via TTL queue, dead-lettering | `RABBITMQ_URL` |
 | Integration | product-service | `RedisCache` against real Redis (TTL, versions, outage fail-open, corrupt values) | `REDIS_URL` |
-| Integration | product-service | Real MySQL: migrations with concurrent replicas, filters, LIKE escaping, **atomic stock and oversell race**, all-or-nothing reservations, deadlock avoidance | `MYSQL_HOST` and a database whose name contains `test` |
+| Integration | product-service | Real MySQL: migrations with concurrent replicas, filters, LIKE escaping, **atomic stock and oversell race**, per-order reservation idempotency (also under concurrent redelivery), tombstones, deadlock avoidance, outbox claim leases | `MYSQL_HOST` and a database whose name contains `test` |
 | End-to-end | whole stack | `make smoke` through the gateway with real tokens | `make up` |
 
 Unit tests of the product service cover 100% of lines in the modules they load. The repository, Redis client,
@@ -153,8 +222,8 @@ destructively on a database whose name does not contain `test`.
 
 ## CI/CD
 
-Each service has a path-filtered workflow (`user-service.yml`, `product-service.yml`) that runs only when that
-service changes:
+Each service has a path-filtered workflow (`user-service.yml`, `product-service.yml`, `order-service.yml`,
+`payment-service.yml`) that runs only when that service (or the shared `docs/events/` fixtures) changes:
 
 1. **test**: lint, unit tests with a coverage gate, then migrations/integration tests against real service containers
 2. **scan**: builds the image and fails on fixable HIGH/CRITICAL vulnerabilities (Trivy). This job has no secrets and no write permissions
@@ -172,8 +241,13 @@ Dependabot keeps pip, npm, Docker and Action versions current.
 - **Two databases (PostgreSQL + MySQL).** Orders and payments need strict transactions and constraints,
   so they use PostgreSQL. The read-heavy product catalog uses MySQL. The split is deliberate to show both;
   in a real system you would likely standardize on one to reduce operational cost.
-- **Choreography over orchestration.** Services react to events and there is no central coordinator, which keeps
-  coupling low. The cost is that the end-to-end flow is harder to see, so correlation IDs and tracing matter.
+- **Orchestrated saga, coordinator in the Order service.** The order status is the single source of truth and the
+  flow is readable in one place (`app/events/handlers.py`). The price is that product and payment depend on the order
+  service's commands; the alternative, pure choreography, spreads the flow across services and makes it harder to follow.
+- **Outbox instead of dual writes.** Writing to the database and publishing to the broker in one step cannot be atomic.
+  The outbox makes the database the source of truth and turns the broker into a delivery detail.
+- **Duplicated messaging code on purpose.** The order and payment services contain similar relay and consumer modules.
+  Independent services should not share a library at this size, and the shared event fixtures keep them honest.
 - **Stateless access tokens, stateful refresh tokens.** Access tokens verify without a network call.
   The trade-off is that a revoked or deactivated user keeps a valid access token until it expires (15 minutes).
   The user-service re-checks the user on every request; the product service does not.
@@ -191,8 +265,8 @@ Dependabot keeps pip, npm, Docker and Action versions current.
 ## Development
 
 ```bash
-make install-dev   # pip install for the Python service, npm ci for the Node service
-make test          # unit tests for both services, no Docker needed
+make install-dev   # pip install for the Python services, npm ci for the Node service
+make test          # unit tests for all services, no Docker needed
 make lint          # ruff, eslint, shellcheck
 ```
 
@@ -205,7 +279,16 @@ MYSQL_HOST=127.0.0.1 MYSQL_USER=ci MYSQL_PASSWORD=ci MYSQL_DATABASE=catalog_test
   npm run test:integration
 ```
 
-Create a user-service migration after changing its models:
+Order and payment tests on real PostgreSQL (the race-condition tests only run there; use a throwaway database):
+
+```bash
+cd services/order-service
+TEST_DATABASE_URL=postgresql+psycopg://ci:ci@localhost:5432/orders_test pytest
+```
+
+Product-service messaging integration tests also need `RABBITMQ_URL=amqp://guest:guest@localhost:5672/`.
+
+Create a user-service migration after changing its models (the other Python services work the same way):
 
 ```bash
 cd services/user-service
@@ -220,7 +303,18 @@ and recorded in `schema_migrations`. A MySQL advisory lock makes concurrent repl
 
 - [x] Phase 1: infrastructure, gateway, User Service, CI
 - [x] Phase 2: Product Service (Node.js + MySQL, Redis caching with invalidation)
-- [ ] Phase 3: Order and Payment services, RabbitMQ saga, idempotency keys
+- [x] Phase 3: Order and Payment services, RabbitMQ saga, idempotency keys
 - [ ] Phase 4: React storefront and admin panel
 - [ ] Phase 5: Notification service, Prometheus metrics, Grafana dashboard
 - [ ] Phase 6: Helm chart, HPA, Ingress, deploy to k3s, optional Argo CD and k6 load tests
+
+## Known limitations
+
+- **No saga timeout or refunds.** An order stuck in `PENDING`/`STOCK_RESERVED` (for example after a message is dead-lettered)
+  is not cancelled automatically, and a payment that succeeds for an already cancelled order is only logged as "refund
+  required". A reaper job and refund flow are planned with the observability work.
+- **No customer cancellation** and no `REFUNDED` state yet.
+- **Outbox and inbox rows are never purged.** Add a retention job before real traffic.
+- **The payment provider is a mock** that keeps its idempotency memory in the process, so a service restart forgets it.
+  A real provider keeps that state itself.
+- **Order creation calls the product service synchronously** (to get prices). If it is down, ordering returns `503`.

@@ -38,6 +38,14 @@ export function loadConfig(env = process.env) {
     },
     // Empty REDIS_URL disables caching entirely; the service still works, just slower.
     redisUrl: env.REDIS_URL ?? '',
+    // Empty RABBITMQ_URL disables messaging: the HTTP API still works, but no checkout events flow.
+    rabbitmqUrl: env.RABBITMQ_URL ?? '',
+    messaging: {
+      maxRetries: intFrom(env, 'EVENT_MAX_RETRIES', 5),
+      retryDelayMs: intFrom(env, 'EVENT_RETRY_DELAY_MS', 5000),
+      prefetch: intFrom(env, 'EVENT_PREFETCH', 10),
+      relayIntervalMs: intFrom(env, 'OUTBOX_POLL_MS', 500),
+    },
     jwt: {
       publicKey,
       issuer: env.JWT_ISSUER ?? 'ecommerce-user-service',

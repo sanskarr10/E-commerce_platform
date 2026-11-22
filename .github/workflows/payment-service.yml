@@ -1,0 +1,149 @@
+name: payment-service
+
+# Path filter: this pipeline only runs when the service (or this file) changes.
+# docs/events holds the shared event fixtures used by the contract tests.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/payment-service/**"
+      - "docs/events/**"
+      - ".github/workflows/payment-service.yml"
+  pull_request:
+    paths:
+      - "services/payment-service/**"
+      - "docs/events/**"
+      - ".github/workflows/payment-service.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: payment-service-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: services/payment-service
+
+jobs:
+  test:
+    name: Lint, test, migrations
+    runs-on: ubuntu-latest
+    services:
+      # A real PostgreSQL so migrations are verified on the production engine,
+      # not just on the SQLite used by the unit tests.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: payments_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d payments_db"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/payment-service/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Unit tests (SQLite, fast)
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=85
+
+      # Same suite on the production engine, plus the race-condition tests that are skipped on SQLite.
+      - name: Tests and concurrency races on PostgreSQL
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/payments_db
+        run: pytest -p no:cacheprovider
+
+      - name: Migrations apply cleanly on PostgreSQL and match the models
+        env:
+          DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/payments_db
+          # Not used by migrations; the key is only read when verifying tokens.
+          JWT_PUBLIC_KEY_PATH: /dev/null
+        run: |
+          alembic upgrade head
+          alembic check
+          alembic downgrade base
+          alembic upgrade head
+
+  scan:
+    name: Build image and scan for vulnerabilities
+    needs: test
+    runs-on: ubuntu-latest
+    # No secrets and no package-write permission here: the scanner is third-party code.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/payment-service
+          load: true
+          tags: payment-service:ci
+          cache-from: type=gha,scope=payment-service
+          cache-to: type=gha,scope=payment-service,mode=max
+
+      # SUPPLY-CHAIN NOTE: in March 2026 trivy-action tags 0.0.1-0.34.2 were force-pushed to
+      # malicious commits (GHSA-69fq-xp46-6x23 / CVE-2026-33634). 0.35.0 is the release that
+      # advisory names as safe, and Trivy v0.69.3 is a binary version it lists as unaffected.
+      # Best practice: replace the tag below with the full commit SHA of a release you have
+      # reviewed, e.g.  gh api repos/aquasecurity/trivy-action/git/ref/tags/0.35.0 --jq .object.sha
+      - name: Trivy scan (fails on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          version: v0.69.3
+          image-ref: payment-service:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  publish:
+    name: Push image to GHCR
+    needs: scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR requires lower-case image names.
+      - name: Compute image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ecommerce-payment-service" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: services/payment-service
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha,scope=payment-service

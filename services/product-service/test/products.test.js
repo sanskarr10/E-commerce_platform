@@ -194,6 +194,28 @@ describe('products API', () => {
     });
   });
 
+  describe('batch lookup (used by the order service)', () => {
+    it('returns the requested active products in one call and omits unknown or archived ids', async () => {
+      const a = (await call('POST', '/api/products', { body: widget({ sku: 'B-1', stock: 3 }) })).body;
+      const b = (await call('POST', '/api/products', { body: widget({ sku: 'B-2' }) })).body;
+      const c = (await call('POST', '/api/products', { body: widget({ sku: 'B-3' }) })).body;
+      await call('DELETE', `/api/products/${c.id}`);
+
+      const response = await anonymous('GET', `/api/products/batch?ids=${a.id},${b.id},${c.id},9999`);
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.body.items.map((p) => p.id).sort(), [a.id, b.id].sort());
+      assert.equal(response.body.items.find((p) => p.id === a.id).stock, 3);
+    });
+
+    it('is not shadowed by /:id and validates its input', async () => {
+      for (const query of ['', '?ids=', '?ids=abc', '?ids=1,,2']) {
+        const response = await anonymous('GET', `/api/products/batch${query}`);
+        assert.equal(response.status, 422, query);
+        assert.deepEqual(response.body.detail[0].loc.slice(0, 1), ['query']);
+      }
+    });
+  });
+
   describe('categories', () => {
     it('creates, lists (sorted, cached) and rejects duplicates', async () => {
       const created = await call('POST', '/api/products/categories', { body: { name: 'Home & Kitchen' } });

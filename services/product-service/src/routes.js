@@ -4,6 +4,7 @@ import {
   categorySchema,
   createProductSchema,
   idSchema,
+  idsSchema,
   listQuerySchema,
   stockSchema,
   updateProductSchema,
@@ -31,6 +32,12 @@ export function createProductRouter({ service, auth }) {
   router.post('/categories', auth.requireAdmin, async (req, res) => {
     const { name } = parse(categorySchema, req.body ?? {}, 'body');
     res.status(201).json(await service.createCategory(name));
+  });
+
+  // Used by the order service at checkout: one round trip for every line of the cart.
+  router.get('/batch', async (req, res) => {
+    const ids = parse(idsSchema, req.query.ids ?? '', 'query');
+    res.json({ items: await service.getMany(ids) });
   });
 
   router.get('/', async (req, res) => {

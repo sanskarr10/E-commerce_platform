@@ -14,6 +14,8 @@ describe('loadConfig', () => {
     assert.equal(config.mysql.host, 'localhost');
     assert.equal(config.mysql.database, 'catalog');
     assert.equal(config.redisUrl, '');
+    assert.equal(config.rabbitmqUrl, '');
+    assert.deepEqual(config.messaging, { maxRetries: 5, retryDelayMs: 5000, prefetch: 10, relayIntervalMs: 500 });
     assert.equal(config.jwt.issuer, 'ecommerce-user-service');
     assert.equal(config.jwt.audience, 'ecommerce');
     assert.deepEqual(config.cacheTtl, { product: 300, list: 60, categories: 300 });
@@ -25,6 +27,13 @@ describe('loadConfig', () => {
     assert.equal(config.mysql.host, 'db');
     assert.equal(config.redisUrl, 'redis://r:6379');
     assert.equal(config.cacheTtl.list, 5);
+  });
+
+  it('reads messaging settings', () => {
+    const config = loadConfig({ ...base, RABBITMQ_URL: 'amqp://u:p@mq:5672/', EVENT_MAX_RETRIES: '2', EVENT_RETRY_DELAY_MS: '100' });
+    assert.equal(config.rabbitmqUrl, 'amqp://u:p@mq:5672/');
+    assert.equal(config.messaging.maxRetries, 2);
+    assert.equal(config.messaging.retryDelayMs, 100);
   });
 
   it('fails fast and names every missing required variable', () => {

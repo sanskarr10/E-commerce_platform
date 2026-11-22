@@ -1,9 +1,11 @@
 import { HttpError, conflict, notFound } from './errors.js';
+import { buildEnvelope } from './events/envelope.js';
 import { PRODUCT_COLUMNS, PRODUCT_FROM, buildListQuery } from './queries.js';
 
 const ER_DUP_ENTRY = 1062;
 const ER_NO_REFERENCED_ROW = 1452;
 const ER_LOCK_DEADLOCK = 1213;
+const CONSUMER = 'product-service';
 
 export function mapProduct(row) {
   return {
@@ -152,51 +154,123 @@ export class ProductRepository {
     }
   }
 
+  /** Batch lookup for the order service: active products only, unknown ids are simply absent. */
+  async getManyByIds(ids) {
+    if (ids.length === 0) return [];
+    const [rows] = await this.pool.query(
+      `SELECT ${PRODUCT_COLUMNS} ${PRODUCT_FROM} WHERE p.id IN (?) AND p.is_active = 1`,
+      [ids],
+    );
+    return rows.map(mapProduct);
+  }
+
   /**
-   * All-or-nothing reservation for an order. Items are merged and locked in id order, so two
-   * orders that share products cannot deadlock each other.
-   * Returns { ok: true } or { ok: false, failures: [{ product_id, reason }] }.
+   * Idempotent consumer step: records the event id in the SAME transaction as the effect.
+   * A redelivery violates the primary key and is reported as a duplicate. In MySQL a duplicate-key
+   * error does not abort the surrounding transaction, so the caller can simply return.
    */
-  async reserveStock(items) {
-    const wanted = new Map();
-    for (const { product_id: id, quantity } of items) {
-      wanted.set(id, (wanted.get(id) ?? 0) + quantity);
+  async #claimEvent(connection, eventId) {
+    try {
+      await connection.query('INSERT INTO inbox (event_id, consumer) VALUES (?, ?)', [eventId, CONSUMER]);
+      return true;
+    } catch (err) {
+      if (err?.errno === ER_DUP_ENTRY) return false;
+      throw err;
     }
-    const ordered = [...wanted.entries()].sort(([a], [b]) => a - b);
+  }
+
+  async #emit(connection, event) {
+    await connection.query('INSERT INTO outbox (id, event_type, payload) VALUES (?, ?, ?)', [
+      event.id,
+      event.type,
+      JSON.stringify(event),
+    ]);
+  }
+
+  /**
+   * Saga step 1: hold stock for an order, all or nothing, and emit stock.reserved or stock.failed.
+   * Everything happens in one transaction: inbox row, reservation row, stock updates and outbox row.
+   * Lines are merged and locked in product-id order so two orders sharing products cannot deadlock.
+   *
+   * Returns { outcome: 'reserved' | 'failed' | 'duplicate' | 'already_handled', productIds }.
+   */
+  async reserveForOrder({ eventId, orderId, items, correlationId }) {
+    const wanted = new Map();
+    for (const { product_id: id, quantity } of items) wanted.set(id, (wanted.get(id) ?? 0) + quantity);
+    const lines = [...wanted.entries()].sort(([a], [b]) => a - b).map(([product_id, quantity]) => ({ product_id, quantity }));
 
     return this.#transaction(async (connection) => {
-      for (const [id, quantity] of ordered) {
+      if (!(await this.#claimEvent(connection, eventId))) return { outcome: 'duplicate', productIds: [] };
+
+      await connection.query('SAVEPOINT reserve');
+      try {
+        // The primary key makes "one reservation per order" a database guarantee. It also trips when
+        // order.cancelled arrived first and left a tombstone, so a late order.created holds nothing.
+        await connection.query('INSERT INTO stock_reservations (order_id, status, items) VALUES (?, ?, ?)', [
+          orderId,
+          'RESERVED',
+          JSON.stringify(lines),
+        ]);
+      } catch (err) {
+        if (err?.errno === ER_DUP_ENTRY) return { outcome: 'already_handled', productIds: [] };
+        throw err;
+      }
+
+      for (const { product_id: id, quantity } of lines) {
         const [result] = await connection.query(
           'UPDATE products SET stock = stock - ? WHERE id = ? AND is_active = 1 AND stock >= ?',
           [quantity, id, quantity],
         );
-        if (result.affectedRows !== 1) {
-          const [rows] = await connection.query('SELECT stock, is_active FROM products WHERE id = ?', [id]);
-          let reason = 'insufficient_stock';
-          if (rows.length === 0) reason = 'not_found';
-          else if (!rows[0].is_active) reason = 'inactive';
-          // Throwing rolls back every earlier decrement in this order.
-          throw Object.assign(new Error('reservation failed'), { failures: [{ product_id: id, reason }] });
-        }
+        if (result.affectedRows === 1) continue;
+
+        const [rows] = await connection.query('SELECT stock, is_active FROM products WHERE id = ?', [id]);
+        let reason = 'insufficient_stock';
+        if (rows.length === 0) reason = 'not_found';
+        else if (!rows[0].is_active) reason = 'inactive';
+
+        // Undo the reservation row and every earlier decrement for this order, keep the inbox row.
+        await connection.query('ROLLBACK TO SAVEPOINT reserve');
+        await connection.query('INSERT INTO stock_reservations (order_id, status, items) VALUES (?, ?, ?)', [
+          orderId,
+          'FAILED',
+          JSON.stringify(lines),
+        ]);
+        await this.#emit(
+          connection,
+          buildEnvelope('stock.failed', { order_id: orderId, failures: [{ product_id: id, reason }] }, correlationId),
+        );
+        return { outcome: 'failed', productIds: [] };
       }
-      return { ok: true };
-    }).catch((err) => {
-      if (err.failures) return { ok: false, failures: err.failures };
-      throw err;
+
+      await this.#emit(connection, buildEnvelope('stock.reserved', { order_id: orderId }, correlationId));
+      return { outcome: 'reserved', productIds: lines.map((line) => line.product_id) };
     });
   }
 
-  /** Compensating action for a failed payment: give the reserved units back. */
-  async releaseStock(items) {
-    const returned = new Map();
-    for (const { product_id: id, quantity } of items) {
-      returned.set(id, (returned.get(id) ?? 0) + quantity);
-    }
-    const ordered = [...returned.entries()].sort(([a], [b]) => a - b);
-    await this.#transaction(async (connection) => {
-      for (const [id, quantity] of ordered) {
+  /**
+   * Saga compensation: give the stock held for a cancelled order back, exactly once.
+   * If no reservation exists yet (order.cancelled overtook order.created) a tombstone is written so
+   * the late order.created cannot reserve stock for an order that is already dead.
+   *
+   * Returns { outcome: 'released' | 'nothing_to_release' | 'duplicate', productIds }.
+   */
+  async releaseForOrder({ eventId, orderId }) {
+    return this.#transaction(async (connection) => {
+      if (!(await this.#claimEvent(connection, eventId))) return { outcome: 'duplicate', productIds: [] };
+
+      const [rows] = await connection.query('SELECT status, items FROM stock_reservations WHERE order_id = ? FOR UPDATE', [orderId]);
+      if (rows.length === 0) {
+        await connection.query('INSERT INTO stock_reservations (order_id, status, items) VALUES (?, ?, ?)', [orderId, 'CANCELLED', '[]']);
+        return { outcome: 'nothing_to_release', productIds: [] };
+      }
+      if (rows[0].status !== 'RESERVED') return { outcome: 'nothing_to_release', productIds: [] };
+
+      const lines = JSON.parse(rows[0].items);
+      for (const { product_id: id, quantity } of lines) {
         await connection.query('UPDATE products SET stock = stock + ? WHERE id = ?', [quantity, id]);
       }
+      await connection.query('UPDATE stock_reservations SET status = ? WHERE order_id = ?', ['RELEASED', orderId]);
+      return { outcome: 'released', productIds: lines.map((line) => line.product_id) };
     });
   }
 

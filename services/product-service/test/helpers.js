@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import { createApp } from '../src/app.js';
 import { createAuth } from '../src/auth.js';
 import { HttpError, conflict, notFound } from '../src/errors.js';
+import { buildEnvelope } from '../src/events/envelope.js';
 import { createLogger } from '../src/logger.js';
 import { ProductService } from '../src/service.js';
 
@@ -78,6 +79,9 @@ export class FakeRepo {
     this.nextCategoryId = 1;
     this.down = false;
     this.lastFilters = null;
+    this.inbox = new Set();
+    this.reservations = new Map();
+    this.outbox = [];
     this.calls = { list: 0, getById: 0, listCategories: 0 };
   }
 
@@ -173,18 +177,53 @@ export class FakeRepo {
     return structuredClone(product);
   }
 
-  async reserveStock(items) {
-    for (const { product_id: id, quantity } of items) {
-      const product = this.products.get(id);
-      if (!product) return { ok: false, failures: [{ product_id: id, reason: 'not_found' }] };
-      if (product.stock < quantity) return { ok: false, failures: [{ product_id: id, reason: 'insufficient_stock' }] };
-    }
-    for (const { product_id: id, quantity } of items) this.products.get(id).stock -= quantity;
-    return { ok: true };
+  async getManyByIds(ids) {
+    return ids.map((id) => this.products.get(id)).filter((p) => p?.is_active).map((p) => structuredClone(p));
   }
 
-  async releaseStock(items) {
-    for (const { product_id: id, quantity } of items) this.products.get(id).stock += quantity;
+  // Same observable behaviour as the MySQL implementation (verified by test/integration/mysql.test.js).
+  async reserveForOrder({ eventId, orderId, items, correlationId }) {
+    if (this.inbox.has(eventId)) return { outcome: 'duplicate', productIds: [] };
+    this.inbox.add(eventId);
+    if (this.reservations.has(orderId)) return { outcome: 'already_handled', productIds: [] };
+
+    const lines = new Map();
+    for (const { product_id: id, quantity } of items) lines.set(id, (lines.get(id) ?? 0) + quantity);
+    const sorted = [...lines.entries()].sort(([a], [b]) => a - b);
+    for (const [id, quantity] of sorted) {
+      const product = this.products.get(id);
+      let reason = null;
+      if (!product) reason = 'not_found';
+      else if (!product.is_active) reason = 'inactive';
+      else if (product.stock < quantity) reason = 'insufficient_stock';
+      if (reason) {
+        this.reservations.set(orderId, { status: 'FAILED', items: [] });
+        this.emit('stock.failed', { order_id: orderId, failures: [{ product_id: id, reason }] }, correlationId);
+        return { outcome: 'failed', productIds: [] };
+      }
+    }
+    for (const [id, quantity] of sorted) this.products.get(id).stock -= quantity;
+    this.reservations.set(orderId, { status: 'RESERVED', items: sorted });
+    this.emit('stock.reserved', { order_id: orderId }, correlationId);
+    return { outcome: 'reserved', productIds: sorted.map(([id]) => id) };
+  }
+
+  async releaseForOrder({ eventId, orderId }) {
+    if (this.inbox.has(eventId)) return { outcome: 'duplicate', productIds: [] };
+    this.inbox.add(eventId);
+    const reservation = this.reservations.get(orderId);
+    if (!reservation) {
+      this.reservations.set(orderId, { status: 'CANCELLED', items: [] });
+      return { outcome: 'nothing_to_release', productIds: [] };
+    }
+    if (reservation.status !== 'RESERVED') return { outcome: 'nothing_to_release', productIds: [] };
+    for (const [id, quantity] of reservation.items) this.products.get(id).stock += quantity;
+    reservation.status = 'RELEASED';
+    return { outcome: 'released', productIds: reservation.items.map(([id]) => id) };
+  }
+
+  emit(type, data, correlationId) {
+    this.outbox.push(buildEnvelope(type, data, correlationId));
   }
 
   async listCategories() {

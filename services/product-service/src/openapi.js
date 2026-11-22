@@ -106,6 +106,20 @@ export const openapi = {
         responses: { 201: { description: 'Created', content: json(ref('Product')) }, ...authErrors, 409: problem('SKU already exists'), 422: problem('Validation error') },
       },
     },
+    '/api/products/batch': {
+      get: {
+        tags: ['products'],
+        summary: 'Look up several products at once (not cached)',
+        description: 'Used by the order service at checkout. Archived and unknown ids are omitted from the result.',
+        parameters: [
+          { name: 'ids', in: 'query', required: true, schema: { type: 'string', example: '1,2,3' }, description: 'Comma-separated ids, at most 50' },
+        ],
+        responses: {
+          200: { description: 'Matching active products', content: json({ type: 'object', properties: { items: { type: 'array', items: ref('Product') } } }) },
+          422: problem('Invalid ids'),
+        },
+      },
+    },
     '/api/products/{id}': {
       parameters: [idParam],
       get: {

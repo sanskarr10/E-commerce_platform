@@ -132,14 +132,18 @@ describe('ProductService caching', () => {
       const b = await service.create(product('B'));
       await service.get(a.id);
       await service.get(b.id);
+      const orderId = '5f3c1d52-8d3e-4a52-9a52-0c6a0d3f9b10';
+      const created = { id: '00000000-0000-4000-8000-000000000001', correlation_id: orderId };
+      const items = [{ product_id: a.id, quantity: 2 }, { product_id: b.id, quantity: 1 }];
 
-      const reserved = await service.reserveStock([{ product_id: a.id, quantity: 2 }, { product_id: b.id, quantity: 1 }]);
-      assert.deepEqual(reserved, { ok: true });
+      assert.equal(await service.reserveForOrder(created, { order_id: orderId, items }), 'reserved');
       assert.equal((await service.get(a.id)).value.stock, 3);
       assert.equal((await service.get(b.id)).value.stock, 4);
 
-      await service.releaseStock([{ product_id: a.id, quantity: 2 }]);
+      const cancelled = { id: '00000000-0000-4000-8000-000000000002', correlation_id: orderId };
+      assert.equal(await service.releaseForOrder(cancelled, { order_id: orderId }), 'released');
       assert.equal((await service.get(a.id)).value.stock, 5);
+      assert.equal((await service.get(b.id)).value.stock, 5);
     });
   });
 

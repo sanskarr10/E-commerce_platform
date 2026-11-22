@@ -17,6 +17,22 @@ updates:
     directory: /services/product-service
     schedule:
       interval: weekly
+  - package-ecosystem: pip
+    directory: /services/order-service
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/order-service
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /services/payment-service
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/payment-service
+    schedule:
+      interval: weekly
   - package-ecosystem: github-actions
     directory: /
     schedule:

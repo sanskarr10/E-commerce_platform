@@ -1,0 +1,12 @@
+{
+  "id": "00000000-0000-4000-8000-000000000006",
+  "type": "payment.failed",
+  "version": 1,
+  "occurred_at": "2026-11-21T08:00:00.000Z",
+  "correlation_id": "5f3c1d52-8d3e-4a52-9a52-0c6a0d3f9b10",
+  "data": {
+    "order_id": "5f3c1d52-8d3e-4a52-9a52-0c6a0d3f9b10",
+    "payment_id": "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+    "reason": "card_declined"
+  }
+}

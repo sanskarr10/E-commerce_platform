@@ -6,10 +6,12 @@ on:
     branches: [main]
     paths:
       - "services/product-service/**"
+      - "docs/events/**"
       - ".github/workflows/product-service.yml"
   pull_request:
     paths:
       - "services/product-service/**"
+      - "docs/events/**"
       - ".github/workflows/product-service.yml"
 
 permissions:
@@ -28,7 +30,8 @@ jobs:
     name: Lint, unit and integration tests
     runs-on: ubuntu-latest
     services:
-      # Real MySQL and Redis: this is where the atomic-stock and oversell-race tests run.
+      # Real MySQL, Redis and RabbitMQ: this is where the oversell-race, inbox/outbox and
+      # retry/dead-letter tests run.
       mysql:
         image: mysql:8.4
         env:
@@ -50,6 +53,15 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports: ["5672:5672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 20s
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +80,7 @@ jobs:
       - name: Unit tests (coverage gate)
         run: npm run test:coverage
 
-      - name: Integration tests against real MySQL and Redis
+      - name: Integration tests against real MySQL, Redis and RabbitMQ
         env:
           MYSQL_HOST: 127.0.0.1
           MYSQL_PORT: "3306"
@@ -76,6 +88,7 @@ jobs:
           MYSQL_PASSWORD: ci
           MYSQL_DATABASE: catalog_test
           REDIS_URL: redis://127.0.0.1:6379
+          RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/
         run: npm run test:integration
 
       - name: Audit production dependencies

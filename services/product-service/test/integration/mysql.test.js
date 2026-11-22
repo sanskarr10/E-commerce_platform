@@ -9,6 +9,7 @@ import mysql from 'mysql2/promise';
 import { HttpError } from '../../src/errors.js';
 import { createLogger } from '../../src/logger.js';
 import { runMigrations } from '../../src/migrate.js';
+import { MysqlOutboxStore } from '../../src/events/relay.js';
 import { ProductRepository } from '../../src/repository.js';
 import { seed } from '../../src/seed.js';
 
@@ -33,7 +34,7 @@ function connectionOptions() {
 async function dropSchema(options) {
   const connection = await mysql.createConnection(options);
   await connection.query('SET FOREIGN_KEY_CHECKS = 0');
-  await connection.query('DROP TABLE IF EXISTS products, categories, schema_migrations');
+  await connection.query('DROP TABLE IF EXISTS products, categories, stock_reservations, inbox, outbox, schema_migrations');
   await connection.query('SET FOREIGN_KEY_CHECKS = 1');
   await connection.end();
 }
@@ -51,14 +52,14 @@ describe('migrations (real MySQL)', { skip: !enabled && 'MYSQL_HOST not set' }, 
       runMigrations(options, { logger: silent }),
       runMigrations(options, { logger: silent }),
     ]);
-    assert.equal(first.length + second.length, 1, 'exactly one runner applies 001_init.sql; the other waits on the lock');
+    assert.equal(first.length + second.length, 2, 'both migrations are applied once in total; the other runner waits on the lock');
 
     assert.deepEqual(await runMigrations(options, { logger: silent }), []);
 
     const connection = await mysql.createConnection(options);
     const [rows] = await connection.query('SELECT version FROM schema_migrations');
     await connection.end();
-    assert.deepEqual(rows.map((row) => row.version), ['001_init.sql']);
+    assert.deepEqual(rows.map((row) => row.version), ['001_init.sql', '002_messaging.sql']);
   });
 });
 
@@ -77,6 +78,9 @@ describe('ProductRepository (real MySQL)', { skip: !enabled && 'MYSQL_HOST not s
     await pool?.end();
   });
   beforeEach(async () => {
+    await pool.query('DELETE FROM outbox');
+    await pool.query('DELETE FROM inbox');
+    await pool.query('DELETE FROM stock_reservations');
     await pool.query('DELETE FROM products');
     await pool.query('DELETE FROM categories');
   });
@@ -197,50 +201,124 @@ describe('ProductRepository (real MySQL)', { skip: !enabled && 'MYSQL_HOST not s
       await assert.rejects(repo.adjustStock(777777, 1), (err) => err.status === 404);
     });
 
-    it('reserveStock never oversells: 20 concurrent single-unit orders on stock 5 -> exactly 5 win', async () => {
-      const { id } = await repo.create(newProduct('RES-1', { stock: 5 }));
-      const results = await Promise.all(Array.from({ length: 20 }, () => repo.reserveStock([{ product_id: id, quantity: 1 }])));
-      assert.equal(results.filter((r) => r.ok).length, 5);
-      assert.ok(results.filter((r) => !r.ok).every((r) => r.failures[0].reason === 'insufficient_stock'));
-      assert.equal((await repo.getById(id)).stock, 0);
+    let n = 0;
+    const uid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
+    const orderId = () => `aaaaaaaa-0000-4000-8000-${String(++n).padStart(12, '0')}`;
+    const reserve = (order, items, eventId = uid()) => repo.reserveForOrder({ eventId, orderId: order, items, correlationId: order });
+    const release = (order, eventId = uid()) => repo.releaseForOrder({ eventId, orderId: order });
+    const outboxTypes = async () => (await pool.query('SELECT event_type FROM outbox ORDER BY seq'))[0].map((r) => r.event_type);
+
+    it('batch lookup returns only active products', async () => {
+      const a = await repo.create(newProduct('BATCH-A'));
+      const b = await repo.create(newProduct('BATCH-B', { is_active: false }));
+      assert.deepEqual((await repo.getManyByIds([a.id, b.id, 987654])).map((p) => p.id), [a.id]);
+      assert.deepEqual(await repo.getManyByIds([]), []);
     });
 
-    it('reserveStock is all-or-nothing: a failing line rolls back the earlier lines', async () => {
+    it('reserveForOrder never oversells: 20 concurrent single-unit orders on stock 5 -> exactly 5 win', async () => {
+      const { id } = await repo.create(newProduct('RES-1', { stock: 5 }));
+      const results = await Promise.all(Array.from({ length: 20 }, () => reserve(orderId(), [{ product_id: id, quantity: 1 }])));
+      assert.equal(results.filter((r) => r.outcome === 'reserved').length, 5);
+      assert.equal(results.filter((r) => r.outcome === 'failed').length, 15);
+      assert.equal((await repo.getById(id)).stock, 0);
+      const types = await outboxTypes();
+      assert.equal(types.filter((t) => t === 'stock.reserved').length, 5);
+      assert.equal(types.filter((t) => t === 'stock.failed').length, 15);
+    });
+
+    it('is all-or-nothing: a failing line rolls back earlier lines, and the failure is recorded', async () => {
       const a = await repo.create(newProduct('AON-A', { stock: 5 }));
       const b = await repo.create(newProduct('AON-B', { stock: 0 }));
-      const result = await repo.reserveStock([{ product_id: a.id, quantity: 2 }, { product_id: b.id, quantity: 1 }]);
-      assert.deepEqual(result, { ok: false, failures: [{ product_id: b.id, reason: 'insufficient_stock' }] });
+      const order = orderId();
+      const result = await reserve(order, [{ product_id: a.id, quantity: 2 }, { product_id: b.id, quantity: 1 }]);
+      assert.equal(result.outcome, 'failed');
       assert.equal((await repo.getById(a.id)).stock, 5, 'stock of the first line must be restored');
+      const [rows] = await pool.query('SELECT status FROM stock_reservations WHERE order_id = ?', [order]);
+      assert.equal(rows[0].status, 'FAILED');
+      const [events] = await pool.query('SELECT payload FROM outbox');
+      assert.deepEqual(JSON.parse(events[0].payload).data.failures, [{ product_id: b.id, reason: 'insufficient_stock' }]);
     });
 
-    it('reserveStock reports not_found and inactive, and merges duplicate lines', async () => {
+    it('reports not_found and inactive, and merges duplicate lines', async () => {
       const a = await repo.create(newProduct('REAS-A', { stock: 3 }));
-      assert.deepEqual((await repo.reserveStock([{ product_id: 555555, quantity: 1 }])).failures, [{ product_id: 555555, reason: 'not_found' }]);
-      assert.equal((await repo.reserveStock([{ product_id: a.id, quantity: 2 }, { product_id: a.id, quantity: 2 }])).ok, false); // 4 > 3
+      const reasonOf = async () => JSON.parse((await pool.query('SELECT payload FROM outbox ORDER BY seq DESC LIMIT 1'))[0][0].payload).data.failures[0].reason;
+      await reserve(orderId(), [{ product_id: 555555, quantity: 1 }]);
+      assert.equal(await reasonOf(), 'not_found');
+      await reserve(orderId(), [{ product_id: a.id, quantity: 2 }, { product_id: a.id, quantity: 2 }]); // 4 > 3
+      assert.equal(await reasonOf(), 'insufficient_stock');
       assert.equal((await repo.getById(a.id)).stock, 3);
       await repo.archive(a.id);
-      assert.equal((await repo.reserveStock([{ product_id: a.id, quantity: 1 }])).failures[0].reason, 'inactive');
+      await reserve(orderId(), [{ product_id: a.id, quantity: 1 }]);
+      assert.equal(await reasonOf(), 'inactive');
+    });
+
+    it('is idempotent: the same event id, or a second event for the same order, reserves once', async () => {
+      const { id } = await repo.create(newProduct('IDEM-1', { stock: 10 }));
+      const order = orderId();
+      const event = uid();
+      assert.equal((await reserve(order, [{ product_id: id, quantity: 4 }], event)).outcome, 'reserved');
+      assert.equal((await reserve(order, [{ product_id: id, quantity: 4 }], event)).outcome, 'duplicate');
+      assert.equal((await reserve(order, [{ product_id: id, quantity: 4 }])).outcome, 'already_handled');
+      assert.equal((await repo.getById(id)).stock, 6);
+      assert.deepEqual(await outboxTypes(), ['stock.reserved']);
+    });
+
+    it('concurrent duplicate deliveries of one event reserve exactly once', async () => {
+      const { id } = await repo.create(newProduct('IDEM-2', { stock: 10 }));
+      const order = orderId();
+      const event = uid();
+      await Promise.all(Array.from({ length: 8 }, () => reserve(order, [{ product_id: id, quantity: 1 }], event)));
+      assert.equal((await repo.getById(id)).stock, 9);
+      assert.deepEqual(await outboxTypes(), ['stock.reserved']);
     });
 
     it('opposite-order concurrent orders do not deadlock (locks are taken in id order)', async () => {
       const a = await repo.create(newProduct('DL-A', { stock: 1000 }));
       const b = await repo.create(newProduct('DL-B', { stock: 1000 }));
-      const orders = Array.from({ length: 60 }, (_, i) =>
-        repo.reserveStock(i % 2 === 0
+      const results = await Promise.all(Array.from({ length: 60 }, (_, i) =>
+        reserve(orderId(), i % 2 === 0
           ? [{ product_id: a.id, quantity: 1 }, { product_id: b.id, quantity: 1 }]
           : [{ product_id: b.id, quantity: 1 }, { product_id: a.id, quantity: 1 }]),
-      );
-      const results = await Promise.all(orders); // would reject with ER_LOCK_DEADLOCK without ordering/retry
-      assert.ok(results.every((r) => r.ok));
+      ));
+      assert.ok(results.every((r) => r.outcome === 'reserved'));
       assert.equal((await repo.getById(a.id)).stock, 940);
       assert.equal((await repo.getById(b.id)).stock, 940);
     });
 
-    it('releaseStock gives reserved units back', async () => {
+    it('releaseForOrder gives stock back exactly once, even under concurrent cancels', async () => {
       const { id } = await repo.create(newProduct('REL-1', { stock: 4 }));
-      await repo.reserveStock([{ product_id: id, quantity: 3 }]);
-      await repo.releaseStock([{ product_id: id, quantity: 3 }]);
+      const order = orderId();
+      await reserve(order, [{ product_id: id, quantity: 3 }]);
+      await Promise.all(Array.from({ length: 5 }, () => release(order)));
       assert.equal((await repo.getById(id)).stock, 4);
+      const [rows] = await pool.query('SELECT status FROM stock_reservations WHERE order_id = ?', [order]);
+      assert.equal(rows[0].status, 'RELEASED');
+    });
+
+    it('a cancel that arrives before the order blocks the late reservation', async () => {
+      const { id } = await repo.create(newProduct('REL-2', { stock: 4 }));
+      const order = orderId();
+      assert.equal((await release(order)).outcome, 'nothing_to_release');
+      assert.equal((await reserve(order, [{ product_id: id, quantity: 3 }])).outcome, 'already_handled');
+      assert.equal((await repo.getById(id)).stock, 4);
+    });
+
+    it('outbox claim: ordered, leased, markable and safe across concurrent relays', async () => {
+      const { id } = await repo.create(newProduct('OUT-1', { stock: 100 }));
+      for (let i = 0; i < 6; i += 1) await reserve(orderId(), [{ product_id: id, quantity: 1 }]);
+      const store = new MysqlOutboxStore(pool);
+
+      const [first, second] = await Promise.all([store.claim(3), store.claim(3)]);
+      const seqs = [...first, ...second].map((r) => r.seq);
+      assert.equal(new Set(seqs).size, 6, 'two relays never claim the same row');
+      assert.deepEqual(first.map((r) => r.seq), [...first.map((r) => r.seq)].sort((x, y) => x - y));
+
+      assert.deepEqual(await store.claim(10), [], 'leased rows are invisible to other relays');
+      await store.release(first.map((r) => r.seq));
+      assert.equal((await store.claim(10)).length, 3, 'released rows are claimable again');
+
+      await store.markPublished(seqs);
+      assert.deepEqual(await store.claim(10), [], 'published rows are never claimed again');
     });
   });
 

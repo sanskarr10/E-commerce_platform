@@ -55,7 +55,7 @@ server {
         proxy_pass $user_service;
     }
 
-    # Not built yet (see roadmap in README): these answer 503 until the services exist.
+    # Domain services. Custom headers such as Idempotency-Key pass through unchanged.
     location /api/products {
         limit_req zone=api_zone burst=40 nodelay;
         proxy_pass $product_service;

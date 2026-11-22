@@ -107,16 +107,31 @@ export class ProductService {
     return product;
   }
 
-  /** Used by the order saga in Phase 3. */
-  async reserveStock(items) {
-    const result = await this.repo.reserveStock(items);
-    await this.cache.del(...items.map((item) => `product:${item.product_id}`));
-    return result;
+  /** Saga step: hold stock for an order. Returns the outcome name for logging. */
+  async reserveForOrder(envelope, data) {
+    const { outcome, productIds } = await this.repo.reserveForOrder({
+      eventId: envelope.id,
+      orderId: data.order_id,
+      items: data.items,
+      correlationId: envelope.correlation_id,
+    });
+    await this.cache.del(...productIds.map((id) => `product:${id}`));
+    return outcome;
   }
 
-  async releaseStock(items) {
-    await this.repo.releaseStock(items);
-    await this.cache.del(...items.map((item) => `product:${item.product_id}`));
+  /** Saga compensation: give the stock back. Returns the outcome name for logging. */
+  async releaseForOrder(envelope, data) {
+    const { outcome, productIds } = await this.repo.releaseForOrder({
+      eventId: envelope.id,
+      orderId: data.order_id,
+    });
+    await this.cache.del(...productIds.map((id) => `product:${id}`));
+    return outcome;
+  }
+
+  /** Not cached on purpose: the order service wants the price and activity at the moment of checkout. */
+  getMany(ids) {
+    return this.repo.getManyByIds(ids);
   }
 
   listCategories() {

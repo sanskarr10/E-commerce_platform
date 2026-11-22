@@ -4,6 +4,9 @@ import { createApp } from './app.js';
 import { NullCache, RedisCache } from './cache.js';
 import { createAuth } from './auth.js';
 import { loadConfig } from './config.js';
+import { startMessaging } from './events/amqp.js';
+import { createHandlers } from './events/handlers.js';
+import { MysqlOutboxStore, OutboxRelay } from './events/relay.js';
 import { createLogger } from './logger.js';
 import { ProductRepository } from './repository.js';
 import { ProductService } from './service.js';
@@ -39,20 +42,53 @@ const cache = redis ? new RedisCache(redis, logger) : new NullCache();
 const repo = new ProductRepository(pool);
 const service = new ProductService({ repo, cache, ttl: config.cacheTtl, logger });
 const auth = createAuth(config.jwt);
+let shuttingDown = false;
 const app = createApp({ service, auth, repo, cache, logger });
 
 const server = app.listen(config.port, () => {
   logger.info(`product-service listening on :${config.port}`, { cache: redis ? 'redis' : 'disabled' });
 });
 
+// Messaging: consume order events and relay our outbox. Without RABBITMQ_URL the HTTP API still works.
+let messaging = null;
+let relay = null;
+if (config.rabbitmqUrl) {
+  try {
+    messaging = await startMessaging({
+      url: config.rabbitmqUrl,
+      handlers: createHandlers({ service, logger }),
+      config: config.messaging,
+      logger,
+      // Exit and let Docker/Kubernetes restart us: the outbox guarantees nothing is lost meanwhile.
+      onClose: () => {
+        if (shuttingDown) return;
+        logger.error('rabbitmq connection closed, exiting so the orchestrator restarts the service');
+        process.exit(1);
+      },
+    });
+    relay = new OutboxRelay({
+      store: new MysqlOutboxStore(pool),
+      publish: messaging.publish,
+      logger,
+      intervalMs: config.messaging.relayIntervalMs,
+    });
+    relay.start();
+    logger.info('messaging started');
+  } catch (err) {
+    logger.error('could not start messaging', { error: err.message });
+    process.exit(1);
+  }
+}
+
 // Graceful shutdown so Kubernetes rolling updates and `docker stop` do not drop in-flight requests.
-let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info(`${signal} received, shutting down`);
   setTimeout(() => process.exit(1), 10_000).unref(); // hard stop if something hangs
   server.close(async () => {
+    if (relay) await relay.stop().catch(() => {});
+    if (messaging) await messaging.close();
     await pool.end().catch(() => {});
     if (redis) await redis.quit().catch(() => {});
     process.exit(0);
