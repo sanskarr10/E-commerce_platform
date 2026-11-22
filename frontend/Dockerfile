@@ -1,7 +1,7 @@
 # One Dockerfile for both apps:  docker build --build-arg APP=storefront|admin -f frontend/Dockerfile frontend
 # Stage 1 compiles the React app; stage 2 is nginx serving the static files and proxying /api to the gateway,
 # so the browser only ever talks to one origin (the refresh-token cookie needs that).
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 ARG APP=storefront
 WORKDIR /repo
 COPY package.json package-lock.json tsconfig.base.json ./
