@@ -194,6 +194,30 @@ services:
       retries: 10
     restart: unless-stopped
 
+  storefront:
+    build:
+      context: ../frontend
+      args:
+        APP: storefront
+    ports:
+      - "${STOREFRONT_PORT:-8081}:80"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
+  admin:
+    build:
+      context: ../frontend
+      args:
+        APP: admin
+    ports:
+      - "${ADMIN_PORT:-8082}:80"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   mysql-data:

@@ -1,0 +1,88 @@
+.skip { position: absolute; left: -999px; }
+.skip:focus { left: 8px; top: 8px; background: var(--paper); padding: .5em 1em; z-index: 10; }
+
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1.5rem; padding: .8rem clamp(1rem, 4vw, 2.5rem); background: var(--paper); border-bottom: 1px solid var(--line); }
+.brand { font: 700 1.4rem var(--font-head); color: var(--ink); text-decoration: none; letter-spacing: -0.02em; }
+.bar nav { display: flex; gap: 1.2rem; flex: 1; }
+.bar nav a { color: var(--ink-soft); text-decoration: none; font-weight: 600; padding: .3em 0; border-bottom: 2px solid transparent; }
+.bar nav a.active { color: var(--ink); border-color: var(--ink); }
+.badge { margin-left: .4em; background: var(--cobalt); color: #fff; border-radius: 99px; padding: 0 .5em; font-size: .8rem; }
+.who { display: flex; align-items: center; gap: .8rem; }
+
+main { padding: clamp(1rem, 3vw, 2rem) clamp(1rem, 4vw, 2.5rem) 4rem; max-width: 1180px; }
+
+.filters { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: 1rem; }
+.filters label { margin: 0; }
+.filters .grow { flex: 1 1 240px; }
+.filters select { width: auto; margin: 0; }
+.filters .check { display: flex; align-items: center; gap: .4em; font-weight: 500; }
+.filters .check input { width: auto; margin: 0; }
+
+.chips { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.5rem; }
+.chip { background: var(--paper); color: var(--ink); border: 2px solid var(--chip, var(--ink)); border-radius: 99px; padding: .3em 1em; }
+.chip:hover:not(:disabled) { background: var(--paper); filter: brightness(.96); }
+.chip.on { background: var(--chip, var(--ink)); color: var(--chip-ink, #fff); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 1.2rem; }
+.tile { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; display: flex; flex-direction: column; }
+.tile-chip { display: flex; align-items: flex-end; justify-content: space-between; height: 104px; padding: .8rem 1rem; background: var(--chip); color: var(--chip-ink); text-decoration: none; }
+.tile-sku { font: 600 .8rem var(--font-body); opacity: .85; }
+.tile-body { padding: .9rem 1rem 1rem; display: flex; flex-direction: column; flex: 1; }
+.tile h3 a { color: var(--ink); text-decoration: none; }
+.tile h3 a:hover { text-decoration: underline; }
+.tile-cat { margin: 0 0 .8rem; font-size: .88rem; }
+.tile-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex-wrap: wrap; }
+.low-stock { color: var(--danger); font-size: .85rem; margin: .5rem 0 0; font-weight: 600; }
+
+.pager { display: flex; align-items: center; gap: 1rem; margin-top: 1.5rem; }
+
+.detail { display: grid; grid-template-columns: minmax(180px, 320px) 1fr; gap: 2rem; align-items: start; }
+.detail-chip { aspect-ratio: 1; background: var(--chip); color: var(--chip-ink); border-radius: var(--radius); display: flex; flex-direction: column; justify-content: space-between; padding: 1.2rem; font-weight: 600; }
+.detail-chip svg { width: 56px; height: 56px; }
+.price.big { font-size: 1.8rem; margin: .2em 0 .6em; }
+
+.lines { width: 100%; border-collapse: collapse; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 1rem; }
+.lines th, .lines td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.lines th { font-size: .88rem; color: var(--ink-soft); font-weight: 600; }
+.lines .num { text-align: right; }
+.lines tfoot td { font-weight: 700; border-bottom: 0; }
+.qty input { width: 5.5em; margin: 0; }
+.qty { margin: 0; }
+
+.panel { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.3rem 1.5rem; }
+.panel.narrow { max-width: 420px; }
+.switch { margin: 1em 0 0; }
+.checkout { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; align-items: start; }
+.plain { list-style: none; padding: 0; margin: 0 0 1rem; }
+.plain li, .sum { display: flex; justify-content: space-between; gap: 1rem; padding: .4rem 0; }
+.sum { border-top: 1px solid var(--line); margin: 0 0 1rem; }
+fieldset { border: 0; padding: 0; margin: 0 0 .5rem; }
+.radio { display: flex; align-items: center; gap: .6em; font-weight: 500; margin-bottom: .5em; }
+.radio input { width: auto; margin: 0; }
+
+.pill { display: inline-block; padding: .1em .7em; border-radius: 99px; font-size: .85rem; font-weight: 600; background: #e3e7ee; }
+.pill.paid, .pill.delivered { background: #d9efe5; color: var(--forest); }
+.pill.cancelled { background: #f9dcd9; color: var(--danger); }
+.pill.shipped { background: #dbe4ff; color: #1f3fb8; }
+
+/* The order tracker: the backend saga, step by step. */
+.tracker { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.3rem 1.5rem; }
+.tracker ol { list-style: none; margin: 0; padding: 0; }
+.step { display: flex; gap: 1rem; position: relative; padding-bottom: 1.3rem; }
+.step:last-child { padding-bottom: 0; }
+.step:not(:last-child)::before { content: ''; position: absolute; left: 9px; top: 22px; bottom: 2px; width: 2px; background: var(--line); }
+.step.done:not(:last-child)::before { background: var(--forest); }
+.dot { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line); background: var(--paper); flex: none; margin-top: 2px; }
+.step.done .dot { background: var(--forest); border-color: var(--forest); }
+.step.active .dot { border-color: var(--cobalt); background: var(--cobalt); box-shadow: 0 0 0 0 rgba(47, 91, 255, .5); animation: pulse 1.6s ease-out infinite; }
+.step.todo strong { color: var(--ink-soft); font-weight: 500; }
+.step strong { display: block; }
+.step p { margin: .2em 0 0; }
+/* inside the tracker */
+.tracker .alert { margin: 1.2rem 0 0; }
+@keyframes pulse { to { box-shadow: 0 0 0 10px rgba(47, 91, 255, 0); } }
+
+@media (max-width: 640px) {
+  .detail { grid-template-columns: 1fr; }
+  .lines th:nth-child(2), .lines td:nth-child(2) { padding-inline: .4rem; }
+}

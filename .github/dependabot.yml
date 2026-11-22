@@ -37,3 +37,16 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    groups:
+      react:
+        patterns: ["react", "react-dom", "react-router-dom", "@types/react*"]
+      tooling:
+        patterns: ["vite", "vitest", "@vitest/*", "eslint*", "typescript*", "@typescript-eslint/*"]
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule:
+      interval: weekly

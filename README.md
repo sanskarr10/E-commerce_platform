@@ -3,14 +3,15 @@
 A polyglot microservices e-commerce backend built to demonstrate service boundaries, event-driven
 design, caching, and a production-style DevOps workflow: Docker, Nginx gateway, GitHub Actions, and Kubernetes.
 
-> **Status: Phase 3 complete.** Infrastructure, API gateway, CI, and the **User**, **Product**, **Order** and
-> **Payment** services are implemented, including the RabbitMQ checkout saga. The rest is in the
+> **Status: Phase 4 complete.** Infrastructure, API gateway, CI, the **User**, **Product**, **Order** and
+> **Payment** services (including the RabbitMQ checkout saga) and the React **storefront** and **admin** are implemented. The rest is in the
 > [roadmap](#roadmap). Replace `<you>/<repo>` in the badges below after pushing to GitHub.
 
 ![user-service](https://github.com/<you>/<repo>/actions/workflows/user-service.yml/badge.svg)
 ![product-service](https://github.com/<you>/<repo>/actions/workflows/product-service.yml/badge.svg)
 ![order-service](https://github.com/<you>/<repo>/actions/workflows/order-service.yml/badge.svg)
 ![payment-service](https://github.com/<you>/<repo>/actions/workflows/payment-service.yml/badge.svg)
+![frontend](https://github.com/<you>/<repo>/actions/workflows/frontend.yml/badge.svg)
 ![platform-checks](https://github.com/<you>/<repo>/actions/workflows/platform-checks.yml/badge.svg)
 
 ## Architecture
@@ -60,7 +61,9 @@ make seed    # loads 4 categories and 12 sample products
 make smoke   # end-to-end checks: auth, catalog, caching, and the whole checkout saga
 ```
 
-- Gateway: http://localhost:8080
+- Storefront: http://localhost:8081 (sign up, add to cart, pay with a test card, watch the order progress)
+- Admin: http://localhost:8082 (sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`)
+- Gateway and API: http://localhost:8080
 - Swagger UI: `/api/users/docs`, `/api/products/docs`, `/api/orders/docs`, `/api/payments/docs` on the gateway
 - RabbitMQ management UI: http://localhost:15672 (localhost only)
 - A bootstrap admin is created from `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env`. **Change these.**
@@ -80,8 +83,29 @@ make smoke   # end-to-end checks: auth, catalog, caching, and the whole checkout
 | GitHub Actions CI | Done | Path-filtered pipeline per service: lint, tests, real PostgreSQL/MySQL/Redis, Trivy scan, push to GHCR |
 | Bash tooling | Done | `gen-keys`, `healthcheck`, `smoke-test`, `smoke-test-products`, `smoke-test-orders`, `db-backup` (all ShellCheck-clean) |
 | Notification service | Planned | Will consume `order.confirmed`, `order.shipped`, `order.delivered`, `order.cancelled` |
-| React storefront and admin | Planned | |
+| **React storefront** | Done | Catalog with search/filter/sort, cart, checkout with an Idempotency-Key, **live order tracker** that follows the saga, my orders |
+| **React admin** | Done | Admin-only sign in, product CRUD, stock adjustment, archive, categories, order fulfilment, payments |
 | Helm chart / Kubernetes | Planned | |
+
+## Frontend
+
+`frontend/` is an npm workspace: `shared` (typed API client, auth, money, idempotency, theme), `storefront` and `admin`.
+React 19, TypeScript, Vite, TanStack Query, React Router. In production each app is an nginx image serving the
+static build and proxying `/api/` to the gateway, so the browser sees **one origin** and the httpOnly refresh cookie works.
+
+- **Auth.** The access token lives in memory only. A 401 triggers one shared refresh (refresh tokens are single use) and a single retry; if it fails the session ends. On page load the app restores the session from the refresh cookie.
+- **Idempotent checkout.** The Idempotency-Key is kept per cart in `sessionStorage`, so a double click, a timeout retry or a reload sends the same key and never creates a second order. It is cleared once the order exists.
+- **Order tracker.** The order page polls every 1.5 s until the order is `DELIVERED` or `CANCELLED`, showing each saga step as it completes, or why it was cancelled.
+- **Money** is integer minor units end to end and formatted only for display.
+
+```bash
+make web-install   # npm ci
+make web-mock      # fake API on :8090 (admin@example.com / Admin123!, demo@example.com / Demo1234), no Docker needed
+cd frontend && API_TARGET=http://localhost:8090 npm run dev:storefront   # http://localhost:5173
+make web-dev       # or run both against the real gateway after `make up`
+```
+
+Test card tokens at checkout: `tok_success`, `tok_decline`, `tok_insufficient`, `tok_flaky` (fails once, then succeeds).
 
 ## User Service API
 
@@ -213,6 +237,7 @@ Closing that window completely needs versioned detail keys or write-through cach
 | Integration | product-service | Real RabbitMQ: topic routing, publisher confirms, retry via TTL queue, dead-lettering | `RABBITMQ_URL` |
 | Integration | product-service | `RedisCache` against real Redis (TTL, versions, outage fail-open, corrupt values) | `REDIS_URL` |
 | Integration | product-service | Real MySQL: migrations with concurrent replicas, filters, LIKE escaping, **atomic stock and oversell race**, per-order reservation idempotency (also under concurrent redelivery), tombstones, deadlock avoidance, outbox claim leases | `MYSQL_HOST` and a database whose name contains `test` |
+| Component and unit | frontend (72) | API client (single-flight refresh, session loss), idempotency keys, cart rules, auth bootstrap, catalog filters, checkout, polling tracker, admin access control and CRUD | nothing (jsdom) |
 | End-to-end | whole stack | `make smoke` through the gateway with real tokens | `make up` |
 
 Unit tests of the product service cover 100% of lines in the modules they load. The repository, Redis client,
@@ -266,7 +291,7 @@ Dependabot keeps pip, npm, Docker and Action versions current.
 
 ```bash
 make install-dev   # pip install for the Python services, npm ci for the Node service
-make test          # unit tests for all services, no Docker needed
+make test          # unit tests for all services and the frontend, no Docker needed
 make lint          # ruff, eslint, shellcheck
 ```
 
@@ -304,7 +329,7 @@ and recorded in `schema_migrations`. A MySQL advisory lock makes concurrent repl
 - [x] Phase 1: infrastructure, gateway, User Service, CI
 - [x] Phase 2: Product Service (Node.js + MySQL, Redis caching with invalidation)
 - [x] Phase 3: Order and Payment services, RabbitMQ saga, idempotency keys
-- [ ] Phase 4: React storefront and admin panel
+- [x] Phase 4: React storefront and admin panel
 - [ ] Phase 5: Notification service, Prometheus metrics, Grafana dashboard
 - [ ] Phase 6: Helm chart, HPA, Ingress, deploy to k3s, optional Argo CD and k6 load tests
 

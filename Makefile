@@ -3,9 +3,10 @@ USER_DIR := services/user-service
 PRODUCT_DIR := services/product-service
 ORDER_DIR := services/order-service
 PAYMENT_DIR := services/payment-service
+FRONTEND_DIR := frontend
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs ps keys test lint fmt install-dev smoke seed backup clean
+.PHONY: help up down logs ps keys test lint fmt install-dev smoke seed backup clean web-install web-dev web-mock
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -45,18 +46,29 @@ test: ## Run unit tests for all services (no Docker needed)
 	cd $(ORDER_DIR) && python -m pytest
 	cd $(PAYMENT_DIR) && python -m pytest
 	cd $(PRODUCT_DIR) && npm test
+	cd $(FRONTEND_DIR) && npm test
 
 lint: ## Lint all services and the shell scripts
 	cd $(USER_DIR) && ruff check . && ruff format --check .
 	cd $(ORDER_DIR) && ruff check . && ruff format --check .
 	cd $(PAYMENT_DIR) && ruff check . && ruff format --check .
 	cd $(PRODUCT_DIR) && npm run lint
+	cd $(FRONTEND_DIR) && npm run lint && npm run typecheck
 	@command -v shellcheck >/dev/null && shellcheck scripts/*.sh || echo "(shellcheck not installed, skipped)"
 
 fmt: ## Auto-format the Python services
 	cd $(USER_DIR) && ruff check --fix . && ruff format .
 	cd $(ORDER_DIR) && ruff check --fix . && ruff format .
 	cd $(PAYMENT_DIR) && ruff check --fix . && ruff format .
+
+web-install: ## Install the frontend dependencies
+	cd $(FRONTEND_DIR) && npm ci
+
+web-mock: ## Run the fake API (no Docker) for working on the frontends
+	cd $(FRONTEND_DIR) && npm run dev:mock
+
+web-dev: ## Storefront on :5173 and admin on :5174 against the real gateway (run `make up` first)
+	cd $(FRONTEND_DIR) && (npm run dev:admin & npm run dev:storefront; wait)
 
 seed: ## Load sample categories and products into the running catalog
 	$(COMPOSE) exec product-service node src/seed.js
