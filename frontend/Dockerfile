@@ -13,7 +13,7 @@ COPY shared shared
 COPY ${APP} ${APP}
 RUN npm run build -w @shop/${APP}
 
-FROM nginx:1.27-alpine
+FROM nginx:1.29-alpine
 ARG APP=storefront
 ENV GATEWAY_UPSTREAM=gateway:80
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
