@@ -31,6 +31,7 @@ server {
     set $product_service http://product-service:3000;
     set $order_service http://order-service:8000;
     set $payment_service http://payment-service:8000;
+    set $notification_service http://notification-service:3100;
 
     error_page 502 503 504 = @upstream_unavailable;
     location @upstream_unavailable {
@@ -71,6 +72,13 @@ server {
         proxy_pass $payment_service;
     }
 
+    location /api/notifications {
+        limit_req zone=api_zone burst=40 nodelay;
+        proxy_pass $notification_service;
+    }
+
+    # /metrics is deliberately NOT routed: Prometheus scrapes services directly on the internal network,
+    # so the catch-all below answers 404 to anyone outside.
     location / {
         default_type application/json;
         return 404 '{"detail":"Not found"}';

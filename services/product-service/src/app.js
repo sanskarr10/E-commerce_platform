@@ -4,6 +4,7 @@ import swaggerUiDist from 'swagger-ui-dist';
 import { requestContext } from './logger.js';
 import { HttpError } from './errors.js';
 import { openapi } from './openapi.js';
+import { createMetrics } from './metrics.js';
 import { createProductRouter } from './routes.js';
 
 const DOCS_HTML = `<!doctype html>
@@ -28,7 +29,7 @@ function requestMiddleware(logger) {
     res.setHeader('X-Request-ID', requestId);
     const started = process.hrtime.bigint();
     res.on('finish', () => {
-      if (req.path === '/health') return;
+      if (req.path === '/health' || req.path === '/metrics') return;
       const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
       // Path only, never the query string, which may contain search terms.
       logger.info(`${req.method} ${req.originalUrl.split('?')[0]} -> ${res.statusCode} (${elapsedMs.toFixed(1)} ms)`, {
@@ -54,10 +55,11 @@ function errorHandler(logger) {
   };
 }
 
-export function createApp({ service, auth, repo, cache, logger }) {
+export function createApp({ service, auth, repo, cache, logger, metrics = createMetrics() }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(requestMiddleware(logger));
+  app.use(metrics.middleware);
   app.use(express.json({ limit: '100kb' }));
 
   /** Liveness: the process is up. */
@@ -71,6 +73,11 @@ export function createApp({ service, auth, repo, cache, logger }) {
       return res.status(503).json({ detail: 'Database unavailable' });
     }
     return res.json({ status: 'ready', cache: await cache.status() });
+  });
+
+  // Scraped by Prometheus over the internal network. The gateway never routes this path.
+  app.get('/metrics', async (_req, res) => {
+    res.set('Content-Type', metrics.contentType).send(await metrics.render());
   });
 
   // Docs are mounted before the router so "docs" and "openapi.json" are never read as product ids.

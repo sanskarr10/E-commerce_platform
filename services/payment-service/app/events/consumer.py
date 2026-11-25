@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
+from app import metrics
 from app.events.schemas import Envelope
 
 logger = logging.getLogger("payment-service")
@@ -29,19 +30,24 @@ async def process_delivery(body: bytes, retries: int, handle, max_retries: int) 
         envelope = Envelope.model_validate(json.loads(body))
     except (ValueError, ValidationError):
         logger.error("malformed event, dead-lettering")
+        metrics.EVENTS.labels("unknown", "dead_letter").inc()
         return Decision("dead_letter", reason="malformed_envelope")
 
     try:
-        await handle(envelope)
+        outcome = await handle(envelope)
+        metrics.EVENTS.labels(envelope.type, outcome or "processed").inc()
         return Decision("ack")
     except PermanentError as exc:
         logger.error("event %s rejected: %s", envelope.type, exc)
+        metrics.EVENTS.labels(envelope.type, "dead_letter").inc()
         return Decision("dead_letter", reason="permanent_error")
     except Exception as exc:
         if retries >= max_retries:
             logger.error(
                 "event %s failed %d times, dead-lettering: %s", envelope.type, retries + 1, exc
             )
+            metrics.EVENTS.labels(envelope.type, "dead_letter").inc()
             return Decision("dead_letter", reason="retries_exhausted")
         logger.warning("event %s failed, will retry: %s", envelope.type, exc)
+        metrics.EVENTS.labels(envelope.type, "retry").inc()
         return Decision("retry", attempt=retries + 1)

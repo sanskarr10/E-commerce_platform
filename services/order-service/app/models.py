@@ -37,6 +37,8 @@ class Order(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, index=True)
+    # Contact snapshot from the JWT at order time: notifications need no user-service lookup.
+    user_email: Mapped[str | None] = mapped_column(String(320), default=None)
     status: Mapped[str] = mapped_column(String(16), index=True)
     total_minor: Mapped[int] = mapped_column(BigInteger)
     currency: Mapped[str] = mapped_column(String(3))

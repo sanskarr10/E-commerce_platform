@@ -1,10 +1,21 @@
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
+import jwt
 from sqlalchemy import select
 
 from app.models import IdempotencyKey, Order, Outbox
-from tests.support import ADMIN, CUSTOMER_ID, OTHER_ID, auth, insert_order, make_token
+from tests.support import (
+    ADMIN,
+    CUSTOMER_ID,
+    OTHER_ID,
+    PRIVATE_PEM,
+    SessionLocal,
+    auth,
+    insert_order,
+    make_token,
+)
 
 BODY = {
     "items": [{"product_id": 1, "quantity": 2}, {"product_id": 2, "quantity": 1}],
@@ -262,3 +273,49 @@ class TestPlatform:
     def test_request_id_is_propagated(self, client):
         response = client.get("/health", headers={"X-Request-ID": "abc123"})
         assert response.headers["X-Request-ID"] == "abc123"
+
+
+class TestCustomerEmailSnapshot:
+    BODY = {"items": [{"product_id": 1, "quantity": 1}], "payment_method": "tok_success"}
+
+    def test_email_from_the_token_is_stored_and_sent_in_events(self, client, db):
+        placed = client.post(
+            "/api/orders", json=self.BODY, headers={**auth(), "Idempotency-Key": "e1"}
+        )
+        assert placed.status_code == 201
+        assert "user_email" not in placed.json()  # contact data is not echoed back
+        order_id = uuid.UUID(placed.json()["id"])
+        with SessionLocal() as s:
+            order = s.get(Order, order_id)
+            assert order.user_email == "asha@example.com"
+            order.status = "PAID"
+            s.commit()
+        client.post(f"/api/orders/{order_id}/ship", headers=ADMIN)
+        shipped = [
+            json.loads(r.payload)
+            for r in db.execute(select(Outbox)).scalars()
+            if r.event_type == "order.shipped"
+        ]
+        assert shipped[0]["data"]["user_email"] == "asha@example.com"
+
+    def test_token_without_email_still_places_the_order(self, client, db):
+        bare = jwt.encode(
+            {
+                "sub": str(CUSTOMER_ID),
+                "role": "customer",
+                "iss": "ecommerce-user-service",
+                "aud": "ecommerce",
+                "iat": datetime.now(UTC),
+                "exp": datetime.now(UTC) + timedelta(minutes=5),
+            },
+            PRIVATE_PEM,
+            algorithm="RS256",
+        )
+        r = client.post(
+            "/api/orders",
+            json=self.BODY,
+            headers={"Authorization": f"Bearer {bare}", "Idempotency-Key": "e2"},
+        )
+        assert r.status_code == 201
+        with SessionLocal() as s:
+            assert s.get(Order, uuid.UUID(r.json()["id"])).user_email is None

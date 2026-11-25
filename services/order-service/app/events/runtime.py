@@ -13,7 +13,7 @@ from app.events.relay import OutboxRelay, OutboxStore
 logger = logging.getLogger("order-service")
 
 
-async def handle(envelope) -> None:
+async def handle(envelope) -> str:
     """Runs the (synchronous) database work in a thread so the event loop stays responsive."""
 
     def work() -> str:
@@ -22,6 +22,7 @@ async def handle(envelope) -> None:
 
     outcome = await asyncio.to_thread(work)
     logger.info("%s -> %s", envelope.type, outcome)
+    return outcome
 
 
 class Messaging:

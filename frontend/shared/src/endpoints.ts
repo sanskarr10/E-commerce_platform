@@ -1,6 +1,8 @@
 import type { ApiClient } from './api';
 import type {
+  AppNotification,
   Category,
+  NotificationPage,
   Order,
   OrderDetail,
   Page,
@@ -62,6 +64,13 @@ export function createEndpoints(api: ApiClient) {
         api.request<Page<Order>>('GET', '/api/orders/admin/list', { auth: 'required', query }),
       ship: (id: string) => api.request<OrderDetail>('POST', `/api/orders/${id}/ship`, { auth: 'required' }),
       deliver: (id: string) => api.request<OrderDetail>('POST', `/api/orders/${id}/deliver`, { auth: 'required' }),
+    },
+    notifications: {
+      list: (query: { unread?: boolean; page?: number; page_size?: number } = {}) =>
+        api.request<NotificationPage>('GET', '/api/notifications', { auth: 'required', query }),
+      markRead: (id: string) =>
+        api.request<AppNotification>('POST', `/api/notifications/${id}/read`, { auth: 'required' }),
+      readAll: () => api.request<{ updated: number }>('POST', '/api/notifications/read-all', { auth: 'required' }),
     },
     payments: {
       forOrder: (orderId: string) =>

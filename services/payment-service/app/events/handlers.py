@@ -11,6 +11,7 @@ one of them is safe to repeat:
 """
 
 import logging
+import time
 import uuid
 from collections.abc import Callable
 
@@ -19,11 +20,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import metrics
 from app.events.consumer import PermanentError
 from app.events.envelope import emit
 from app.events.schemas import PAYLOADS, Envelope
 from app.models import Inbox, Payment
-from app.provider import MockProvider
+from app.provider import MockProvider, ProviderUnavailable
 
 logger = logging.getLogger("payment-service")
 CONSUMER = "payment-service"
@@ -106,7 +108,15 @@ def handle_event(
     result = None
     if status == PENDING:
         # May raise ProviderUnavailable: the delivery is retried later with the same payment id.
-        result = provider.charge(str(payment_id), amount, currency, method)
+        started = time.perf_counter()
+        try:
+            result = provider.charge(str(payment_id), amount, currency, method)
+        except ProviderUnavailable:
+            metrics.PROVIDER_CALLS.labels("unavailable").inc()
+            raise
+        finally:
+            metrics.PROVIDER_LATENCY.observe(time.perf_counter() - started)
+        metrics.PROVIDER_CALLS.labels("succeeded" if result.succeeded else "declined").inc()
 
     with session_factory() as db:
         payment = db.execute(

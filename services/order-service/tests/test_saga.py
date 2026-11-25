@@ -96,8 +96,20 @@ class TestPayment:
         assert confirmed["data"] == {
             "order_id": str(order.id),
             "user_id": str(order.user_id),
+            "user_email": "asha@example.com",
             "total_minor": 369700,
             "currency": "INR",
+        }
+
+    def test_cancel_event_carries_who_to_tell_and_why(self, db):
+        order = insert_order("STOCK_RESERVED")
+        handle_event(db, event("payment.failed", order))
+        cancelled = json.loads(db.execute(select(Outbox)).scalars().all()[-1].payload)
+        assert cancelled["data"] == {
+            "order_id": str(order.id),
+            "user_id": str(order.user_id),
+            "user_email": "asha@example.com",
+            "reason": "payment_failed",
         }
 
     def test_failure_cancels_and_asks_for_the_stock_back(self, db):

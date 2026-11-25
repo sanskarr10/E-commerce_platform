@@ -42,7 +42,7 @@ export async function connectWithRetry(url, logger, { attempts = 30, delayMs = 2
  * If the connection drops, `onClose` is called; the process exits and the orchestrator restarts it,
  * which is simpler and safer than hand-rolled reconnection (the outbox guarantees nothing is lost).
  */
-export async function startMessaging({ url, handlers, config, logger, onClose, connection }) {
+export async function startMessaging({ url, handlers, config, logger, onClose, onOutcome, connection }) {
   const conn = connection ?? (await connectWithRetry(url, logger));
   conn.on('error', (err) => logger.error('rabbitmq connection error', { error: err.message }));
   conn.on('close', () => onClose?.());
@@ -80,7 +80,7 @@ export async function startMessaging({ url, handlers, config, logger, onClose, c
       const retries = Number(msg.properties.headers?.['x-retries'] ?? 0);
       const decision = await processDelivery(
         { content: msg.content, retries },
-        { handlers, maxRetries: config.maxRetries, logger },
+        { handlers, maxRetries: config.maxRetries, logger, onOutcome },
       );
       // Re-publish BEFORE acking, so a crash in between duplicates the message instead of losing it.
       if (decision.action === 'retry') {

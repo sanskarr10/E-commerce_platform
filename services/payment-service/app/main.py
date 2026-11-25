@@ -3,16 +3,18 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from sqlalchemy import text
 
+from app import metrics
 from app.core.config import get_settings
 from app.core.logging import configure_logging, request_id_ctx
-from app.db import engine
+from app.db import SessionLocal, engine
 from app.routers import payments
 
 configure_logging()
 logger = logging.getLogger("payment-service")
+metrics.install_database_collector(SessionLocal)
 
 
 @asynccontextmanager
@@ -53,8 +55,10 @@ async def correlation_id_and_access_log(request: Request, call_next):
     try:
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
-        if request.url.path != "/health":
-            elapsed_ms = (time.perf_counter() - started) * 1000
+        elapsed = time.perf_counter() - started
+        if request.url.path not in ("/health", "/metrics"):
+            metrics.observe_request(request, response.status_code, elapsed)
+            elapsed_ms = elapsed * 1000
             logger.info(
                 "%s %s -> %s (%.1f ms)",
                 request.method,
@@ -68,6 +72,12 @@ async def correlation_id_and_access_log(request: Request, call_next):
 
 
 app.include_router(payments.router)
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics() -> Response:
+    """Scraped by Prometheus on the internal network. The gateway has no route to this path."""
+    return Response(metrics.render(), media_type=metrics.CONTENT_TYPE)
 
 
 @app.get("/health", include_in_schema=False)

@@ -1,0 +1,113 @@
+# Unit tests for alerts.yml:  promtool test rules alerts.test.yml   (also run in CI)
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+
+tests:
+  - name: a service that stops answering scrapes pages after a minute
+    interval: 1m
+    input_series:
+      - series: 'up{job="order-service", instance="order-service:8000"}'
+        values: "1 1 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 2m   # down for less than the 1m hold: pending only
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: order-service, instance: "order-service:8000" }
+            exp_annotations:
+              summary: "order-service is not answering scrapes"
+              description: "Prometheus could not scrape order-service:8000 for 1 minute."
+
+  - name: healthy services raise nothing
+    interval: 1m
+    input_series:
+      - series: 'up{job="user-service"}'
+        values: "1x10"
+      - series: 'orders_oldest_unsettled_age_seconds{job="order-service"}'
+        values: "0x10"
+      - series: 'outbox_oldest_unpublished_age_seconds{job="order-service"}'
+        values: "0x10"
+      - series: 'notification_emails_open{job="notification-service"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: OrderStuckInSaga
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: OutboxStuck
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: EmailBacklog
+        exp_alerts: []
+
+  - name: an order that never leaves the saga is flagged
+    interval: 1m
+    input_series:
+      - series: 'orders_oldest_unsettled_age_seconds{job="order-service"}'
+        values: "0 100 200 301 361 421"
+    alert_rule_test:
+      - eval_time: 3m   # over the threshold for the first time: still pending
+        alertname: OrderStuckInSaga
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: OrderStuckInSaga
+        exp_alerts:
+          - exp_labels: { severity: critical, job: order-service }
+            exp_annotations:
+              summary: "An order has been PENDING or STOCK_RESERVED for over 5 minutes"
+              description: "The saga has no timeout yet, so this order will not be cancelled by itself. Check the dead-letter queues in RabbitMQ and the service logs (search the order id as correlation_id)."
+
+  - name: a dead-lettered event pages immediately, with no hold time
+    interval: 1m
+    input_series:
+      - series: 'events_consumed_total{job="notification-service", type="order.confirmed", outcome="processed"}'
+        values: "0 5 10 15 20 25"
+      - series: 'events_consumed_total{job="notification-service", type="order.confirmed", outcome="dead_letter"}'
+        values: "0 0 0 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DeadLetteredEvents
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: DeadLetteredEvents
+        exp_alerts:
+          - exp_labels: { severity: critical, job: notification-service }
+            exp_annotations:
+              summary: "notification-service gave up on an event (it is in the DLQ)"
+              description: "Inspect <service>.events.dlq in the RabbitMQ UI, fix the cause, then move the messages back."
+
+  - name: unsent emails only alert when they stay above the threshold
+    interval: 1m
+    input_series:
+      - series: 'notification_emails_open{job="notification-service"}'
+        values: "30x15"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: EmailBacklog
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: EmailBacklog
+        exp_alerts:
+          - exp_labels: { severity: warning, job: notification-service }
+            exp_annotations:
+              summary: "30 notification emails are not sent yet (SMTP trouble?)"
+
+  - name: a replayed refresh token is reported
+    interval: 1m
+    input_series:
+      - series: 'user_token_refreshes_total{job="user-service", result="replay"}'
+        values: "0 0 1 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RefreshTokenReplay
+        exp_alerts:
+          - exp_labels: { severity: warning, job: user-service, result: replay }
+            exp_annotations:
+              summary: "A used refresh token was presented again (stolen cookie or replay attack)"
+              description: "The whole session family was revoked. Look for the source IP in the gateway logs."

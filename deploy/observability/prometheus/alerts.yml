@@ -1,0 +1,104 @@
+# Alert rules. They are evaluated by Prometheus and visible at http://localhost:9090/alerts.
+# Routing them to people (Alertmanager, Slack, PagerDuty) is the next step in a real deployment.
+groups:
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} is not answering scrapes"
+          description: "Prometheus could not scrape {{ $labels.instance }} for 1 minute."
+
+      - alert: HighErrorRate
+        expr: |
+          sum by (job) (rate(http_request_duration_seconds_count{status_code=~"5.."}[5m]))
+            / sum by (job) (rate(http_request_duration_seconds_count[5m])) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }}: more than 5% of requests fail with 5xx"
+
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.job }}: p95 latency above 1 second for 10 minutes"
+
+  - name: checkout-saga
+    rules:
+      - alert: OrderStuckInSaga
+        expr: orders_oldest_unsettled_age_seconds > 300
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "An order has been PENDING or STOCK_RESERVED for over 5 minutes"
+          description: >-
+            The saga has no timeout yet, so this order will not be cancelled by itself. Check the dead-letter
+            queues in RabbitMQ and the service logs (search the order id as correlation_id).
+
+      - alert: PaymentStuckPending
+        expr: payments_oldest_pending_age_seconds > 300
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "A payment has been pending for over 5 minutes"
+
+      - alert: PaymentProviderFailing
+        expr: |
+          sum(rate(payment_provider_calls_total{result="unavailable"}[5m]))
+            / sum(rate(payment_provider_calls_total[5m])) > 0.2
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "More than 20% of charge attempts fail because the provider is unavailable"
+
+  - name: messaging
+    rules:
+      - alert: OutboxStuck
+        expr: outbox_oldest_unpublished_age_seconds > 120
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }}: events have waited over 2 minutes to reach the broker"
+          description: "RabbitMQ is probably down or unreachable. Nothing is lost: the outbox keeps the events."
+
+      - alert: OutboxBacklog
+        expr: outbox_unpublished_events > 100
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.job }}: {{ $value }} events are waiting in the outbox"
+
+      - alert: DeadLetteredEvents
+        expr: sum by (job) (increase(events_consumed_total{outcome="dead_letter"}[10m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} gave up on an event (it is in the DLQ)"
+          description: "Inspect <service>.events.dlq in the RabbitMQ UI, fix the cause, then move the messages back."
+
+      - alert: EmailBacklog
+        expr: notification_emails_open > 20
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} notification emails are not sent yet (SMTP trouble?)"
+
+  - name: security
+    rules:
+      - alert: RefreshTokenReplay
+        expr: increase(user_token_refreshes_total{result="replay"}[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "A used refresh token was presented again (stolen cookie or replay attack)"
+          description: "The whole session family was revoked. Look for the source IP in the gateway logs."
+
+      - alert: LoginFailureSpike
+        expr: rate(user_logins_total{result="failure"}[5m]) > 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than one failed login per second for 5 minutes (credential stuffing?)"

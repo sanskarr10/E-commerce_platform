@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.catalog import CatalogClient, get_catalog
 from app.db import get_db
 from app.deps import Principal, get_principal, require_admin
-from app.events.envelope import emit
+from app.events.envelope import customer_data, emit
 from app.models import Order
 from app.orders import create_order
 from app.schemas import OrderCreate, OrderDetail, OrderOut, OrderPage
@@ -67,7 +67,7 @@ def place_order(
             status_code=400,
             detail="Idempotency-Key header is required (1-128 printable characters)",
         )
-    result = create_order(db, catalog, principal.user_id, key, payload)
+    result = create_order(db, catalog, principal.user_id, key, payload, principal.email)
     if result.replayed:
         response.status_code = 200
         response.headers["Idempotent-Replayed"] = "true"
@@ -124,7 +124,7 @@ def _advance(db: Session, order_id: uuid.UUID, target: str, event: str) -> Order
         transition(db, order, target)
     except InvalidTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
-    emit(db, event, {"order_id": str(order.id), "user_id": str(order.user_id)}, order.id)
+    emit(db, event, customer_data(order), order.id)
     db.commit()
     return order
 

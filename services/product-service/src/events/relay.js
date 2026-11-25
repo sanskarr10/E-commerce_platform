@@ -40,6 +40,16 @@ export class MysqlOutboxStore {
     }
   }
 
+  /** For metrics: how many rows wait, and how long the oldest has waited. */
+  async stats() {
+    const [[row]] = await this.pool.query(
+      `SELECT COUNT(*) AS unpublished,
+              COALESCE(TIMESTAMPDIFF(SECOND, MIN(created_at), CURRENT_TIMESTAMP(3)), 0) AS oldest
+         FROM outbox WHERE published_at IS NULL`,
+    );
+    return { unpublished: Number(row.unpublished), oldestAgeSeconds: Number(row.oldest) };
+  }
+
   async markPublished(seqs) {
     if (seqs.length === 0) return;
     await this.pool.query('UPDATE outbox SET published_at = CURRENT_TIMESTAMP(3), claimed_until = NULL WHERE seq IN (?)', [seqs]);
@@ -63,11 +73,12 @@ export class OutboxRelay {
   #loop = null;
   #stopSignal = new AbortController();
 
-  constructor({ store, publish, logger, intervalMs = 500 }) {
+  constructor({ store, publish, logger, intervalMs = 500, onPublished = () => {} }) {
     this.store = store;
     this.publish = publish; // async (routingKey, bodyString, messageId) => resolves after broker confirm
     this.logger = logger;
     this.intervalMs = intervalMs;
+    this.onPublished = onPublished;
   }
 
   /** One pass. Returns how many events were published. */
@@ -83,6 +94,7 @@ export class OutboxRelay {
       this.logger.warn('outbox publish failed, will retry', { error: err.message, published: done.length });
     } finally {
       await this.store.markPublished(done);
+      if (done.length > 0) this.onPublished(done.length);
       await this.store.release(rows.map((row) => row.seq).filter((seq) => !done.includes(seq)));
     }
     return done.length;

@@ -23,6 +23,15 @@ def build_envelope(event_type: str, data: dict, correlation_id: uuid.UUID | str)
     }
 
 
+def customer_data(order) -> dict:
+    """Who an order event is about. `user_email` is None for tokens without an email claim."""
+    return {
+        "order_id": str(order.id),
+        "user_id": str(order.user_id),
+        "user_email": order.user_email,
+    }
+
+
 def emit(db: Session, event_type: str, data: dict, correlation_id: uuid.UUID | str) -> dict:
     """Writes the event to the outbox; it is published only if the transaction commits."""
     envelope = build_envelope(event_type, data, correlation_id)

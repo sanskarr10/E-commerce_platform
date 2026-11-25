@@ -7,6 +7,7 @@ import { loadConfig } from './config.js';
 import { startMessaging } from './events/amqp.js';
 import { createHandlers } from './events/handlers.js';
 import { MysqlOutboxStore, OutboxRelay } from './events/relay.js';
+import { createMetrics } from './metrics.js';
 import { createLogger } from './logger.js';
 import { ProductRepository } from './repository.js';
 import { ProductService } from './service.js';
@@ -43,7 +44,9 @@ const repo = new ProductRepository(pool);
 const service = new ProductService({ repo, cache, ttl: config.cacheTtl, logger });
 const auth = createAuth(config.jwt);
 let shuttingDown = false;
-const app = createApp({ service, auth, repo, cache, logger });
+const outboxStore = new MysqlOutboxStore(pool);
+const metrics = createMetrics({ outbox: outboxStore });
+const app = createApp({ service, auth, repo, cache, logger, metrics });
 
 const server = app.listen(config.port, () => {
   logger.info(`product-service listening on :${config.port}`, { cache: redis ? 'redis' : 'disabled' });
@@ -59,6 +62,7 @@ if (config.rabbitmqUrl) {
       handlers: createHandlers({ service, logger }),
       config: config.messaging,
       logger,
+      onOutcome: metrics.eventOutcome,
       // Exit and let Docker/Kubernetes restart us: the outbox guarantees nothing is lost meanwhile.
       onClose: () => {
         if (shuttingDown) return;
@@ -67,7 +71,8 @@ if (config.rabbitmqUrl) {
       },
     });
     relay = new OutboxRelay({
-      store: new MysqlOutboxStore(pool),
+      store: outboxStore,
+      onPublished: metrics.eventsPublished,
       publish: messaging.publish,
       logger,
       intervalMs: config.messaging.relayIntervalMs,

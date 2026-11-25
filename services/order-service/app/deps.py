@@ -16,6 +16,7 @@ ROLE_ADMIN = "admin"
 class Principal:
     user_id: uuid.UUID
     role: str
+    email: str | None = None
 
     @property
     def is_admin(self) -> bool:
@@ -39,7 +40,12 @@ def get_principal(
         raise unauthorized()
     try:
         claims = decode_access_token(credentials.credentials, settings)
-        return Principal(user_id=uuid.UUID(claims["sub"]), role=str(claims.get("role", "")))
+        email = claims.get("email")
+        return Principal(
+            user_id=uuid.UUID(claims["sub"]),
+            role=str(claims.get("role", "")),
+            email=email if isinstance(email, str) and email else None,
+        )
     except (jwt.PyJWTError, ValueError, KeyError):
         raise unauthorized("Invalid or expired token") from None
 

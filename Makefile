@@ -3,6 +3,7 @@ USER_DIR := services/user-service
 PRODUCT_DIR := services/product-service
 ORDER_DIR := services/order-service
 PAYMENT_DIR := services/payment-service
+NOTIFICATION_DIR := services/notification-service
 FRONTEND_DIR := frontend
 
 .DEFAULT_GOAL := help
@@ -40,12 +41,14 @@ ps: ## Show container status
 install-dev: ## Install dev dependencies for all services
 	pip install -r $(USER_DIR)/requirements-dev.txt -r $(ORDER_DIR)/requirements-dev.txt -r $(PAYMENT_DIR)/requirements-dev.txt
 	cd $(PRODUCT_DIR) && npm ci
+	cd $(NOTIFICATION_DIR) && npm ci
 
 test: ## Run unit tests for all services (no Docker needed)
 	cd $(USER_DIR) && python -m pytest --cov=app --cov-report=term-missing
 	cd $(ORDER_DIR) && python -m pytest
 	cd $(PAYMENT_DIR) && python -m pytest
 	cd $(PRODUCT_DIR) && npm test
+	cd $(NOTIFICATION_DIR) && npm test
 	cd $(FRONTEND_DIR) && npm test
 
 lint: ## Lint all services and the shell scripts
@@ -53,6 +56,7 @@ lint: ## Lint all services and the shell scripts
 	cd $(ORDER_DIR) && ruff check . && ruff format --check .
 	cd $(PAYMENT_DIR) && ruff check . && ruff format --check .
 	cd $(PRODUCT_DIR) && npm run lint
+	cd $(NOTIFICATION_DIR) && npm run lint
 	cd $(FRONTEND_DIR) && npm run lint && npm run typecheck
 	@command -v shellcheck >/dev/null && shellcheck scripts/*.sh || echo "(shellcheck not installed, skipped)"
 
@@ -77,6 +81,7 @@ smoke: ## Run the end-to-end smoke tests against the running stack
 	./scripts/smoke-test.sh http://localhost:8080
 	./scripts/smoke-test-products.sh http://localhost:8080
 	./scripts/smoke-test-orders.sh http://localhost:8080
+	./scripts/smoke-test-notifications.sh http://localhost:8080
 
 backup: ## Dump all databases into ./backups
 	./scripts/db-backup.sh

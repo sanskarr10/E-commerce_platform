@@ -42,6 +42,7 @@ const access = new Map(); // access token -> user id
 const orders = [];
 const payments = [];
 const idem = new Map();
+const notes = []; // what the notification service would have stored
 
 const pub = (user) => ({ ...user, password: undefined });
 const send = (res, status, body, headers = {}) => {
@@ -62,6 +63,13 @@ const history = new Map();
 function move(order, to, reason = null) {
   history.get(order.id).push({ from_status: order.status, to_status: to, reason, created_at: now() });
   order.status = to; order.updated_at = now();
+  const note = {
+    PAID: ['order.confirmed', 'Payment received', 'is confirmed. We will tell you when it ships.'],
+    SHIPPED: ['order.shipped', 'Your order has shipped', 'is on its way.'],
+    DELIVERED: ['order.delivered', 'Your order was delivered', 'has been delivered. Enjoy!'],
+    CANCELLED: ['order.cancelled', 'Your order was cancelled', 'was cancelled. You were not charged.'],
+  }[to];
+  if (note) notes.unshift({ id: randomUUID(), user_id: order.user_id, type: note[0], order_id: order.id, title: note[1], body: `Order #${order.id.slice(0, 8)} ${note[2]}`, created_at: now(), read_at: null });
   if (reason && to === 'CANCELLED') order.cancel_reason = reason;
 }
 const detail = (o) => ({ ...o, history: history.get(o.id) });
@@ -213,6 +221,27 @@ async function handle(req, res) {
     if (o.status !== from) return send(res, 409, { detail: `Cannot move an order from ${o.status} to ${to}` });
     move(o, to);
     return send(res, 200, detail(o));
+  }
+  if (path === '/api/notifications' && method === 'GET') {
+    if (!need()) return;
+    const mine = notes.filter((n) => n.user_id === me.id);
+    const list = url.searchParams.get('unread') === 'true' ? mine.filter((n) => !n.read_at) : mine;
+    const out = page(list, url);
+    out.items = out.items.map((n) => ({ ...n, user_id: undefined }));
+    return send(res, 200, { ...out, unread: mine.filter((n) => !n.read_at).length });
+  }
+  if (path === '/api/notifications/read-all' && method === 'POST') {
+    if (!need()) return;
+    const open = notes.filter((n) => n.user_id === me.id && !n.read_at);
+    open.forEach((n) => (n.read_at = now()));
+    return send(res, 200, { updated: open.length });
+  }
+  if ((m = path.match(/^\/api\/notifications\/([0-9a-f-]{36})\/read$/)) && method === 'POST') {
+    if (!need()) return;
+    const n = notes.find((x) => x.id === m[1] && x.user_id === me.id);
+    if (!n) return send(res, 404, { detail: 'Notification not found' });
+    n.read_at ??= now();
+    return send(res, 200, { ...n, user_id: undefined });
   }
   if (path === '/api/payments/admin/list' && method === 'GET') {
     if (!need(true)) return;

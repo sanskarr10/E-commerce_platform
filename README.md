@@ -3,14 +3,16 @@
 A polyglot microservices e-commerce backend built to demonstrate service boundaries, event-driven
 design, caching, and a production-style DevOps workflow: Docker, Nginx gateway, GitHub Actions, and Kubernetes.
 
-> **Status: Phase 4 complete.** Infrastructure, API gateway, CI, the **User**, **Product**, **Order** and
-> **Payment** services (including the RabbitMQ checkout saga) and the React **storefront** and **admin** are implemented. The rest is in the
+> **Status: Phase 5 complete.** Infrastructure, API gateway, CI, the **User**, **Product**, **Order**, **Payment** and
+> **Notification** services (including the RabbitMQ checkout saga), the React **storefront** and **admin**, and
+> **Prometheus + Grafana** observability are implemented. The rest is in the
 > [roadmap](#roadmap). Replace `<you>/<repo>` in the badges below after pushing to GitHub.
 
 ![user-service](https://github.com/<you>/<repo>/actions/workflows/user-service.yml/badge.svg)
 ![product-service](https://github.com/<you>/<repo>/actions/workflows/product-service.yml/badge.svg)
 ![order-service](https://github.com/<you>/<repo>/actions/workflows/order-service.yml/badge.svg)
 ![payment-service](https://github.com/<you>/<repo>/actions/workflows/payment-service.yml/badge.svg)
+![notification-service](https://github.com/<you>/<repo>/actions/workflows/notification-service.yml/badge.svg)
 ![frontend](https://github.com/<you>/<repo>/actions/workflows/frontend.yml/badge.svg)
 ![platform-checks](https://github.com/<you>/<repo>/actions/workflows/platform-checks.yml/badge.svg)
 
@@ -25,7 +27,7 @@ design, caching, and a production-style DevOps workflow: Docker, Nginx gateway, 
             │ rate limiting │   /api/orders    ──► Order Service     (FastAPI)  ──► PostgreSQL orders_db
             │ X-Request-ID  │   /api/payments  ──► Payment Service   (FastAPI)  ──► PostgreSQL payments_db
             └───────────────┘
-                                   RabbitMQ (events)  ◄──►  Order ⇄ Product ⇄ Payment      Notification Service (planned)
+                                   RabbitMQ (events)  ◄──►  Order ⇄ Product ⇄ Payment      Notification Service  ──► PostgreSQL notifications_db + SMTP
 ```
 
 Each service owns its database. Services never query each other's data; they talk over HTTP or events.
@@ -65,6 +67,9 @@ make smoke   # end-to-end checks: auth, catalog, caching, and the whole checkout
 - Admin: http://localhost:8082 (sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`)
 - Gateway and API: http://localhost:8080
 - Swagger UI: `/api/users/docs`, `/api/products/docs`, `/api/orders/docs`, `/api/payments/docs` on the gateway
+- Grafana: http://localhost:3001 (user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`; dashboard "Shop overview")
+- Prometheus: http://localhost:9090 (targets and alerts)
+- Mailpit inbox: http://localhost:8025 (every email the shop sends lands here, nothing leaves your machine)
 - RabbitMQ management UI: http://localhost:15672 (localhost only)
 - A bootstrap admin is created from `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env`. **Change these.**
 
@@ -76,16 +81,48 @@ make smoke   # end-to-end checks: auth, catalog, caching, and the whole checkout
 |---|---|---|
 | Docker Compose stack | Done | PostgreSQL, MySQL, Redis, RabbitMQ, four services, gateway; healthchecks and `depends_on` ordering |
 | Nginx gateway | Done | Path routing, per-endpoint rate limits (stricter on auth), `X-Request-ID` correlation id, JSON 503 when a service is down |
-| **User Service** | Done | Register, login, rotating refresh tokens, profile, admin user list; 30 tests |
+| **User Service** | Done | Register, login, rotating refresh tokens, profile, admin user list; 37 tests |
 | **Product Service** | Done | Catalog CRUD, search/filter/sort/pagination, atomic stock, Redis caching, per-order stock reservation and release over events, batch lookup, OpenAPI docs |
 | **Order Service** | Done | Idempotent order placement, price snapshot, state machine, saga coordinator, admin fulfilment, outbox relay |
 | **Payment Service** | Done | Mock provider with idempotent charges, exactly-once charging, outcome events, read-only API |
 | GitHub Actions CI | Done | Path-filtered pipeline per service: lint, tests, real PostgreSQL/MySQL/Redis, Trivy scan, push to GHCR |
 | Bash tooling | Done | `gen-keys`, `healthcheck`, `smoke-test`, `smoke-test-products`, `smoke-test-orders`, `db-backup` (all ShellCheck-clean) |
-| Notification service | Planned | Will consume `order.confirmed`, `order.shipped`, `order.delivered`, `order.cancelled` |
+| **Notification Service** | Done | Consumes `order.confirmed/shipped/delivered/cancelled`, stores one in-app notification per order and event type, emails the customer over SMTP, REST API to list and mark read |
+| **Observability** | Done | `/metrics` on every service, Prometheus with 12 alert rules (unit-tested with promtool), provisioned Grafana dashboard, per-queue RabbitMQ metrics |
 | **React storefront** | Done | Catalog with search/filter/sort, cart, checkout with an Idempotency-Key, **live order tracker** that follows the saga, my orders |
 | **React admin** | Done | Admin-only sign in, product CRUD, stock adjustment, archive, categories, order fulfilment, payments |
 | Helm chart / Kubernetes | Planned | |
+
+## Notification Service
+
+Node.js + PostgreSQL (`notifications_db`). It only **consumes** events, so it needs no outbox. Order events carry
+`user_id` and `user_email`, a snapshot of the JWT `email` claim taken when the order was placed, so the service never
+calls the user service. A token without an email still produces the in-app notification; only the email is skipped.
+
+- **Idempotent by construction.** `(order_id, type)` is unique, so a redelivered event, or the same event re-emitted with a new id, creates no second notification. The email is *claimed* (`pending` -> `sending` with a lease -> `sent`), so concurrent or redelivered events never send it twice.
+- **Failure handling.** A transient SMTP error (4xx, network) releases the claim and retries through the shared TTL retry queue, then the DLQ. A permanent one (550, unknown mailbox) marks the email `failed` and keeps the in-app notification.
+- **At-least-once email.** If the process dies after SMTP accepted the message but before it was recorded, the lease expires and the email is sent again. That is the usual SMTP trade-off.
+- **Self-provisioning.** On start it creates `notifications_db` if it does not exist (init scripts only run on a brand new volume) and applies SQL migrations under an advisory lock.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/notifications` | My notifications, newest first. `unread=true`, `page`, `page_size`. Returns `unread` (count across all pages) |
+| POST | `/api/notifications/{id}/read` | Idempotent. Someone else's id returns 404 |
+| POST | `/api/notifications/read-all` | Returns `{ "updated": n }` |
+
+The storefront shows an unread badge in the header and a Notifications page.
+
+## Observability
+
+Every service exposes `GET /metrics` (Prometheus text format). The gateway has **no route** to it, so the endpoint is only
+reachable on the internal network. Prometheus scrapes all services and RabbitMQ every 15 s.
+
+- **Per service:** request latency histogram (labelled by route *pattern*, never the raw URL, so scanners cannot explode label cardinality), event outcomes (`events_consumed_total{outcome=processed|duplicate_*|retry|dead_letter}`), outbox backlog and age.
+- **Business:** orders by status, age of the oldest unsettled order, payments by status, payment-provider call results, logins and refresh-token replays, notifications created and emails sent, product cache hits and misses.
+- **Alerts** (`deploy/observability/prometheus/alerts.yml`, 12 rules): service down, 5xx rate, p95 latency, order stuck in the saga, payment stuck, provider failing, outbox stuck or backlogged, dead-lettered event, email backlog, refresh-token replay, login-failure spike. `alerts.test.yml` unit-tests them with `promtool test rules`.
+- **Dashboard:** `Shop overview` is provisioned from `deploy/observability/grafana/dashboards/shop-overview.json`, so a fresh `make up` already has it.
+
+Alert delivery (Alertmanager to Slack or PagerDuty) is deliberately not wired up: alerts are visible at http://localhost:9090/alerts.
 
 ## Frontend
 
@@ -229,15 +266,16 @@ Closing that window completely needs versioned detail keys or write-through cach
 
 | Layer | Service | What it covers | Needs |
 |---|---|---|---|
-| Unit and HTTP | user-service (30) | Auth flows, token attacks, admin routes, bootstrap | nothing (SQLite) |
-| Unit and HTTP | product-service (140) | Validation, query builder, JWT verification, routes, cache, saga handlers, consumer decisions, relay, AMQP adapter (fake channel), contract fixtures, OpenAPI drift guard | nothing (in-memory fakes) |
-| Unit, HTTP and saga | order-service (79) | Idempotency, state machine (every move), each saga handler and its edge cases, contract fixtures, relay, retry/DLQ decisions | nothing (SQLite) |
-| Unit and saga | payment-service (50) | Mock provider, success/decline/transient/flaky, **crash after charge**, duplicate events, contract fixtures | nothing (SQLite) |
+| Unit, HTTP and database | notification-service (68 + 13) | Idempotency, email claim and retry, SMTP failure classes, contract fixtures, routes and auth, AMQP topology; the 13 integration tests run on real PostgreSQL: 10-way claim race, lease takeover, migrations under concurrency | nothing / `TEST_DATABASE_URL` |
+| Unit and HTTP | user-service (37) | Auth flows, token attacks, admin routes, bootstrap | nothing (SQLite) |
+| Unit and HTTP | product-service (148) | Validation, query builder, JWT verification, routes, cache, saga handlers, consumer decisions, relay, AMQP adapter (fake channel), contract fixtures, OpenAPI drift guard | nothing (in-memory fakes) |
+| Unit, HTTP and saga | order-service (96) | Idempotency, state machine (every move), each saga handler and its edge cases, contract fixtures, relay, retry/DLQ decisions | nothing (SQLite) |
+| Unit and saga | payment-service (61) | Mock provider, success/decline/transient/flaky, **crash after charge**, duplicate events, contract fixtures | nothing (SQLite) |
 | Races on PostgreSQL | order-service, payment-service | Concurrent identical POSTs create one order, concurrent duplicate events apply once, relays never claim the same row, one charge under concurrency; the whole suite and Alembic migration/model drift check | `TEST_DATABASE_URL` |
 | Integration | product-service | Real RabbitMQ: topic routing, publisher confirms, retry via TTL queue, dead-lettering | `RABBITMQ_URL` |
 | Integration | product-service | `RedisCache` against real Redis (TTL, versions, outage fail-open, corrupt values) | `REDIS_URL` |
 | Integration | product-service | Real MySQL: migrations with concurrent replicas, filters, LIKE escaping, **atomic stock and oversell race**, per-order reservation idempotency (also under concurrent redelivery), tombstones, deadlock avoidance, outbox claim leases | `MYSQL_HOST` and a database whose name contains `test` |
-| Component and unit | frontend (72) | API client (single-flight refresh, session loss), idempotency keys, cart rules, auth bootstrap, catalog filters, checkout, polling tracker, admin access control and CRUD | nothing (jsdom) |
+| Component and unit | frontend (78) | API client (single-flight refresh, session loss), idempotency keys, cart rules, auth bootstrap, catalog filters, checkout, polling tracker, admin access control and CRUD | nothing (jsdom) |
 | End-to-end | whole stack | `make smoke` through the gateway with real tokens | `make up` |
 
 Unit tests of the product service cover 100% of lines in the modules they load. The repository, Redis client,
@@ -330,7 +368,7 @@ and recorded in `schema_migrations`. A MySQL advisory lock makes concurrent repl
 - [x] Phase 2: Product Service (Node.js + MySQL, Redis caching with invalidation)
 - [x] Phase 3: Order and Payment services, RabbitMQ saga, idempotency keys
 - [x] Phase 4: React storefront and admin panel
-- [ ] Phase 5: Notification service, Prometheus metrics, Grafana dashboard
+- [x] Phase 5: Notification service, Prometheus metrics, Grafana dashboard
 - [ ] Phase 6: Helm chart, HPA, Ingress, deploy to k3s, optional Argo CD and k6 load tests
 
 ## Known limitations

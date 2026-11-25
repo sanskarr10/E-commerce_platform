@@ -5,6 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import metrics
 from app.core.config import Settings, get_settings
 from app.core.security import (
     DUMMY_HASH,
@@ -62,6 +63,7 @@ def register(body: RegisterIn, db: Session = Depends(get_db)) -> User:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
         ) from None
+    metrics.REGISTRATIONS.inc()
     return user
 
 
@@ -75,7 +77,9 @@ def login(
     user = db.scalar(select(User).where(User.email == body.email.lower()))
     password_ok = verify_password(body.password, user.hashed_password if user else DUMMY_HASH)
     if user is None or not password_ok or not user.is_active:
+        metrics.LOGINS.labels("failure").inc()
         raise unauthorized("Invalid email or password")
+    metrics.LOGINS.labels("success").inc()
     return _issue_tokens(user, db, response, settings)
 
 
@@ -88,12 +92,14 @@ def refresh(
 ) -> TokenOut:
     """Rotate the refresh token: each one can be used exactly once."""
     if not refresh_token:
+        metrics.REFRESHES.labels("missing").inc()
         raise unauthorized("Missing refresh token")
 
     row = db.scalar(
         select(RefreshToken).where(RefreshToken.token_hash == hash_refresh_token(refresh_token))
     )
     if row is None:
+        metrics.REFRESHES.labels("invalid").inc()
         raise unauthorized("Invalid refresh token")
 
     if row.revoked_at is not None:
@@ -105,16 +111,20 @@ def refresh(
             .values(revoked_at=utcnow())
         )
         db.commit()
+        metrics.REFRESHES.labels("replay").inc()
         raise unauthorized("Invalid refresh token")
 
     if as_utc(row.expires_at) <= utcnow():
+        metrics.REFRESHES.labels("expired").inc()
         raise unauthorized("Refresh token expired")
 
     user = db.get(User, row.user_id)
     if user is None or not user.is_active:
+        metrics.REFRESHES.labels("invalid").inc()
         raise unauthorized("Invalid refresh token")
 
     row.revoked_at = utcnow()
+    metrics.REFRESHES.labels("success").inc()
     return _issue_tokens(user, db, response, settings)
 
 

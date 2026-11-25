@@ -55,6 +55,8 @@ services:
       - "127.0.0.1:15672:15672" # management UI, localhost only
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+      - ./observability/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro # adds the Prometheus plugin
+      - ./observability/rabbitmq/prometheus.conf:/etc/rabbitmq/conf.d/90-prometheus.conf:ro # per-queue metrics
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -170,6 +172,39 @@ services:
       start_period: 30s # migrations run before the app starts
     restart: unless-stopped
 
+  notification-service:
+    build: ../services/notification-service
+    # The image runs migrations (and creates notifications_db if an older volume lacks it), then starts.
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/notifications_db
+      JWT_PUBLIC_KEY_PATH: /run/keys/jwt_public.pem
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      SMTP_URL: smtp://mailpit:1025
+      MAIL_FROM: "Shop <no-reply@shop.local>"
+    volumes:
+      - ./keys/jwt_public.pem:/run/keys/jwt_public.pem:ro # public key only
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  mailpit:
+    # A fake SMTP server with a web inbox: every email the shop "sends" lands here, nothing leaves your machine.
+    image: axllent/mailpit:v1.27
+    ports:
+      - "127.0.0.1:8025:8025" # inbox UI, localhost only
+    restart: unless-stopped
+
   gateway:
     image: nginx:1.27-alpine
     environment:
@@ -186,6 +221,8 @@ services:
       order-service:
         condition: service_healthy
       payment-service:
+        condition: service_healthy
+      notification-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null || exit 1"]
@@ -218,8 +255,39 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:9090:9090" # localhost only
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me_grafana}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000" # localhost only
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   mysql-data:
   redis-data:
+  prometheus-data:
+  grafana-data:
   rabbitmq-data:

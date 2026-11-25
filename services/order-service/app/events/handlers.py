@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.events.consumer import PermanentError
-from app.events.envelope import emit
+from app.events.envelope import customer_data, emit
 from app.events.schemas import PAYLOADS, Envelope
 from app.models import Inbox, Order
 from app.state import (
@@ -52,7 +52,7 @@ def _load_order(db: Session, order_id: uuid.UUID) -> Order:
 
 def _cancel(db: Session, order: Order, reason: str) -> None:
     transition(db, order, CANCELLED, reason)
-    emit(db, "order.cancelled", {"order_id": str(order.id), "reason": reason}, order.id)
+    emit(db, "order.cancelled", {**customer_data(order), "reason": reason}, order.id)
 
 
 def on_stock_reserved(db: Session, order: Order, _data) -> str:
@@ -76,7 +76,7 @@ def on_stock_reserved(db: Session, order: Order, _data) -> str:
         emit(
             db,
             "order.cancelled",
-            {"order_id": str(order.id), "reason": order.cancel_reason},
+            {**customer_data(order), "reason": order.cancel_reason},
             order.id,
         )
         return "re_emitted_cancel"
@@ -102,8 +102,7 @@ def on_payment_succeeded(db: Session, order: Order, data) -> str:
             db,
             "order.confirmed",
             {
-                "order_id": str(order.id),
-                "user_id": str(order.user_id),
+                **customer_data(order),
                 "total_minor": order.total_minor,
                 "currency": order.currency,
             },

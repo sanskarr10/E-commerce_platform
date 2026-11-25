@@ -65,6 +65,12 @@ fieldset { border: 0; padding: 0; margin: 0 0 .5rem; }
 .pill.cancelled { background: #f9dcd9; color: var(--danger); }
 .pill.shipped { background: #dbe4ff; color: #1f3fb8; }
 
+.head-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.notes { list-style: none; margin: 1rem 0 0; padding: 0; display: grid; gap: .6rem; }
+.note { display: flex; justify-content: space-between; gap: 1rem; background: var(--paper); border: 1px solid var(--line); border-left: 4px solid var(--cobalt); border-radius: var(--radius); padding: .8rem 1rem; }
+.note.read { border-left-color: var(--line); color: var(--ink-soft); }
+.note p { margin: .2em 0 .4em; }
+
 /* The order tracker: the backend saga, step by step. */
 .tracker { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.3rem 1.5rem; }
 .tracker ol { list-style: none; margin: 0; padding: 0; }

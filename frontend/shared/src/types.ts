@@ -92,6 +92,21 @@ export interface Payment {
   updated_at: string;
 }
 
+export interface AppNotification {
+  id: string;
+  type: 'order.confirmed' | 'order.shipped' | 'order.delivered' | 'order.cancelled';
+  order_id: string;
+  title: string;
+  body: string;
+  created_at: string;
+  read_at: string | null;
+}
+
+export interface NotificationPage extends Page<AppNotification> {
+  /** Unread across ALL pages, not just this one. */
+  unread: number;
+}
+
 export interface ProductFilters {
   q?: string;
   category?: string;

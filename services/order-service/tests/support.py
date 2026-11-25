@@ -49,6 +49,7 @@ def make_token(sub=CUSTOMER_ID, role="customer", **overrides) -> str:
     claims = {
         "sub": str(sub),
         "role": role,
+        "email": "asha@example.com",
         "iss": "ecommerce-user-service",
         "aud": "ecommerce",
         "iat": now,
@@ -99,6 +100,7 @@ def insert_order(
         order = Order(
             id=uuid.uuid4(),
             user_id=user_id,
+            user_email="asha@example.com",
             status=status,
             total_minor=total,
             currency=currency,

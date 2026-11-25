@@ -141,3 +141,45 @@ describe('routing', () => {
     expect([Routes, Route, mockFetch, customer].every(Boolean)).toBe(true);
   });
 });
+
+describe('notifications', () => {
+  const note = (over = {}) => ({ id: 'n1', type: 'order.confirmed', order_id: 'abc12345-0000', title: 'Payment received', body: 'Your order #abc12345 is confirmed.', created_at: '2026-01-01T10:00:00Z', read_at: null, ...over });
+  const page = (items: unknown[], unread: number) => ({ items, total: items.length, unread, page: 1, page_size: 50 });
+
+  it('shows the unread count in the navigation', async () => {
+    renderApp(<App />, { 'GET /api/products': { body: list }, 'GET /api/products/categories': { body: categories }, 'GET /api/notifications': { body: page([note()], 3) } });
+    expect(await screen.findByLabelText('3 unread')).toBeInTheDocument();
+  });
+
+  it('does not ask for notifications when signed out', async () => {
+    const m = renderApp(<App />, { 'GET /api/products': { body: list }, 'GET /api/products/categories': { body: categories } }, { signedIn: false });
+    await screen.findByText('Wireless Earbuds');
+    expect(m.calls.some((c) => c.url.startsWith('/api/notifications'))).toBe(false);
+  });
+
+  it('lists notifications and marks one read', async () => {
+    const m = renderApp(<App />, {
+      'GET /api/notifications': { body: page([note()], 1) },
+      'POST /api/notifications/n1/read': { body: note({ read_at: '2026-01-01T10:05:00Z' }) },
+    }, { path: '/notifications' });
+    expect(await screen.findByText('Payment received')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /mark "payment received" as read/i }));
+    await waitFor(() => expect(m.calls.some((c) => c.method === 'POST' && c.url === '/api/notifications/n1/read')).toBe(true));
+  });
+
+  it('marks everything read in one request', async () => {
+    const m = renderApp(<App />, { 'GET /api/notifications': { body: page([note(), note({ id: 'n2' })], 2) }, 'POST /api/notifications/read-all': { body: { updated: 2 } } }, { path: '/notifications' });
+    await userEvent.click(await screen.findByRole('button', { name: 'Mark all read' }));
+    await waitFor(() => expect(m.calls.some((c) => c.url === '/api/notifications/read-all')).toBe(true));
+  });
+
+  it('has an empty state that points somewhere', async () => {
+    renderApp(<App />, { 'GET /api/notifications': { body: page([], 0) } }, { path: '/notifications' });
+    expect(await screen.findByText(/nothing yet/i)).toBeInTheDocument();
+  });
+
+  it('asks signed-out visitors to sign in', async () => {
+    renderApp(<App />, {}, { path: '/notifications', signedIn: false });
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
+  });
+});

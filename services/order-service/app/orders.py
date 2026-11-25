@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import metrics
 from app.catalog import CatalogClient, CatalogUnavailable
 from app.events.envelope import emit
 from app.models import IdempotencyKey, Order, OrderItem, OrderStatusHistory
@@ -50,11 +51,17 @@ def _replay(db: Session, record: IdempotencyKey, digest: str) -> CreateResult:
     if record.request_hash != digest:
         raise _unprocessable("Idempotency-Key was already used with a different request body")
     order = db.get(Order, record.order_id)
+    metrics.IDEMPOTENT_REPLAYS.inc()
     return CreateResult(order=order, replayed=True)
 
 
 def create_order(
-    db: Session, catalog: CatalogClient, user_id: uuid.UUID, key: str, payload: OrderCreate
+    db: Session,
+    catalog: CatalogClient,
+    user_id: uuid.UUID,
+    key: str,
+    payload: OrderCreate,
+    user_email: str | None = None,
 ) -> CreateResult:
     lines = merge_lines(payload)
     digest = request_hash(lines, payload.payment_method)
@@ -83,6 +90,7 @@ def create_order(
     order = Order(
         id=uuid.uuid4(),
         user_id=user_id,
+        user_email=user_email,
         status=PENDING,
         total_minor=total,
         currency=currency,
@@ -122,4 +130,5 @@ def create_order(
         if record is None:
             raise
         return _replay(db, record, digest)
+    metrics.ORDERS_CREATED.inc()
     return CreateResult(order=order, replayed=False)

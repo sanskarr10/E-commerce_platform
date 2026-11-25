@@ -3,9 +3,10 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from sqlalchemy import text
 
+from app import metrics
 from app.bootstrap import bootstrap_admin
 from app.core.config import get_settings
 from app.core.logging import configure_logging, request_id_ctx
@@ -43,8 +44,10 @@ async def correlation_id_and_access_log(request: Request, call_next):
     try:
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
-        if request.url.path != "/health":
-            elapsed_ms = (time.perf_counter() - started) * 1000
+        if request.url.path not in ("/health", "/metrics"):
+            elapsed = time.perf_counter() - started
+            metrics.observe_request(request, response.status_code, elapsed)
+            elapsed_ms = elapsed * 1000
             # Logged before the context var is reset so the JSON "request_id" field is set.
             logger.info(
                 "%s %s -> %s (%.1f ms)",
@@ -66,6 +69,12 @@ app.include_router(users.router)
 def health() -> dict[str, str]:
     """Liveness: the process is up."""
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics() -> Response:
+    """Scraped by Prometheus on the internal network. The gateway has no route to this path."""
+    return Response(metrics.render(), media_type=metrics.CONTENT_TYPE)
 
 
 @app.get("/ready", include_in_schema=False)
