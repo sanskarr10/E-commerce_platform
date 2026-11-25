@@ -107,7 +107,7 @@ jobs:
       # Best practice: replace the tag below with the full commit SHA of a release you have
       # reviewed, e.g.  gh api repos/aquasecurity/trivy-action/git/ref/tags/0.35.0 --jq .object.sha
       - name: Trivy scan (fails on fixable HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           version: v0.69.3
           image-ref: payment-service:ci
