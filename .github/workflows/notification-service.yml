@@ -90,7 +90,7 @@ jobs:
       # SUPPLY-CHAIN NOTE: see the same step in user-service.yml. trivy-action tags up to 0.34.2
       # were compromised in March 2026 (GHSA-69fq-xp46-6x23). Pin a reviewed commit SHA when you can.
       - name: Trivy scan (fails on fixable HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           version: v0.69.3
           image-ref: notification-service:ci
