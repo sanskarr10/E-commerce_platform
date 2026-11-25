@@ -79,7 +79,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build image (not pushed)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: services/notification-service
           load: true
@@ -122,7 +122,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: services/notification-service
           push: true
